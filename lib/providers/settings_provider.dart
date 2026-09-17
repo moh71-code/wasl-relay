@@ -13,9 +13,9 @@ class SettingsProvider extends ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.dark;
   Locale _locale = const Locale('ar');
 
-  String _relayHost = '127.0.0.1';
-  int _relayPort = 8765;
-  bool _useWss = false;
+  String _relayHost = 'wasl-rela.onrender.com';
+  int _relayPort = 443;
+  bool _useWss = true;
 
   bool _sendReadReceipts = true;
   bool _autoDownloadMedia = true;

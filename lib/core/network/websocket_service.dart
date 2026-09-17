@@ -52,7 +52,7 @@ class WebSocketService {
     if (useWss != null) _useWss = useWss;
   }
 
-  void connect(String userId, {String? serverIp, int? serverPort, bool? useWss}) {
+  void connect(String userId, {String? serverIp, int? serverPort, bool? useWss, String? path}) {
     _manuallyDisconnected = false;
     _currentUserId = userId;
     if (serverIp != null && serverIp.isNotEmpty) _serverHost = serverIp;
@@ -66,8 +66,16 @@ class WebSocketService {
 
     try {
       final scheme = _useWss ? 'wss' : 'ws';
-      final uri = Uri.parse('$scheme://$_serverHost:$_serverPort');
-      
+      // Support both plain relay (ws://host:port) and path-based relay (wss://host/ws/userId)
+      final effectivePath = (path != null && path.isNotEmpty)
+          ? path
+          : (_serverPort == 443 || _serverPort == 80 ? '/ws/$userId' : '');
+      final uriStr = effectivePath.isEmpty
+          ? '$scheme://$_serverHost:$_serverPort'
+          : '$scheme://$_serverHost$effectivePath';
+      final uri = Uri.parse(uriStr);
+      debugPrint('WebSocket connecting to: $uri');
+
       _channel?.sink.close();
       _channel = WebSocketChannel.connect(uri);
 

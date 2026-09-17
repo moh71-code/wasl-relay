@@ -14,7 +14,6 @@ class QrDisplayDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // التأكد من وجود قيمة للمعرف التشفيري، وفي حال عدم وجودها يتم وضع نص افتراضي للوقاية
     final displayData = userId.trim().isNotEmpty ? userId : 'WASL-UNKNOWN-ID';
 
     return AlertDialog(
@@ -81,16 +80,53 @@ class QrScannerScreen extends StatefulWidget {
 class _QrScannerScreenState extends State<QrScannerScreen> {
   bool _scanned = false;
   StreamSubscription? _wsSub;
+  MobileScannerController? _scannerController;
+  bool _cameraReady = false;
+  String? _cameraError;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    try {
+      _scannerController = MobileScannerController(
+        detectionSpeed: DetectionSpeed.normal,
+        facing: CameraFacing.back,
+        torchEnabled: false,
+      );
+      await _scannerController!.start();
+      if (mounted) {
+        setState(() {
+          _cameraReady = true;
+          _cameraError = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _cameraError = 'تعذّر تشغيل الكاميرا.\nتأكد من منح صلاحية الكاميرا للتطبيق من إعدادات الهاتف.';
+          _cameraReady = false;
+        });
+      }
+    }
+  }
 
   @override
   void dispose() {
     _wsSub?.cancel();
+    _scannerController?.dispose();
     super.dispose();
   }
 
   Future<void> _startPairing(String targetId) async {
-    if (_scanned) return;
+    if (_scanned || targetId.isEmpty) return;
     _scanned = true;
+
+    // Stop camera to save battery
+    await _scannerController?.stop();
 
     await PairingService()
         .sendPairRequest(myId: widget.currentUserId, targetId: targetId);
@@ -105,7 +141,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: const [
-            CircularProgressIndicator(),
+            CircularProgressIndicator(color: Colors.teal),
             SizedBox(height: 12),
             Text('في انتظار قبول الطرف الآخر...'),
           ],
@@ -118,15 +154,13 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       final senderId = data['sender_id'];
       final recipientId = data['recipient_id'];
 
-      // We only care about responses addressed to this device and related to the target we requested
       if (recipientId != widget.currentUserId) return;
 
       if (type == 'pair_accept' && senderId != null) {
-        // save contact and navigate to chat
         await DatabaseHelper.instance
             .saveContact(senderId, 'طرف مقترن', 'connected');
         if (!mounted) return;
-        Navigator.of(context).pop(); // close loading
+        Navigator.of(context).pop();
         _wsSub?.cancel();
         Navigator.pushReplacement(
           context,
@@ -139,11 +173,14 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         );
       } else if (type == 'pair_reject' && senderId == targetId) {
         if (mounted) {
-          Navigator.of(context).pop(); // close loading
+          Navigator.of(context).pop();
           _wsSub?.cancel();
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('تم رفض طلب الاقتران من $senderId')),
           );
+          // Restart camera on rejection
+          setState(() => _scanned = false);
+          await _scannerController?.start();
         }
       }
     });
@@ -157,15 +194,20 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         title: const Text('إدخال معرف الجهاز يدوياً'),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(hintText: 'WASL-XXXXXX'),
+          decoration: const InputDecoration(
+            hintText: 'WASL-XXXXXX',
+            prefixIcon: Icon(Icons.security, color: Colors.teal),
+          ),
+          autofocus: true,
         ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('إلغاء')),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
             onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('إرسال طلب'),
+            child: const Text('إرسال طلب', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -179,6 +221,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.black,
       appBar: AppBar(
         title: const Text('مسح كود التبادل المشفر'),
         backgroundColor: Colors.teal,
@@ -189,20 +232,121 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
             tooltip: 'إدخال يدوي',
             onPressed: _askManualEntry,
           ),
+          if (_scannerController != null)
+            IconButton(
+              icon: const Icon(Icons.flash_on),
+              tooltip: 'فلاش',
+              onPressed: () => _scannerController?.toggleTorch(),
+            ),
         ],
       ),
-      body: MobileScanner(
-        onDetect: (capture) {
-          if (_scanned) return;
-          final List<Barcode> barcodes = capture.barcodes;
-          for (final barcode in barcodes) {
-            if (barcode.rawValue != null) {
-              final scanned = barcode.rawValue!.trim();
-              _startPairing(scanned);
-              break;
-            }
-          }
-        },
+      body: _cameraError != null
+          ? _buildCameraError()
+          : !_cameraReady
+              ? const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: Colors.teal),
+                      SizedBox(height: 16),
+                      Text('جارٍ تشغيل الكاميرا...',
+                          style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
+                )
+              : Stack(
+                  children: [
+                    MobileScanner(
+                      controller: _scannerController,
+                      onDetect: (capture) {
+                        if (_scanned) return;
+                        for (final barcode in capture.barcodes) {
+                          if (barcode.rawValue != null) {
+                            final scanned = barcode.rawValue!.trim();
+                            if (scanned.isNotEmpty) {
+                              _startPairing(scanned);
+                              break;
+                            }
+                          }
+                        }
+                      },
+                    ),
+                    // Scanning frame overlay
+                    Center(
+                      child: Container(
+                        width: 250,
+                        height: 250,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.teal, width: 3),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'وجّه الكاميرا نحو الكود',
+                            style: TextStyle(color: Colors.white70, fontSize: 14),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Manual entry hint at bottom
+                    Positioned(
+                      bottom: 40,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: TextButton.icon(
+                          icon: const Icon(Icons.keyboard, color: Colors.white70),
+                          label: const Text(
+                            'أو أدخل المعرف يدوياً',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                          onPressed: _askManualEntry,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
+
+  Widget _buildCameraError() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.camera_alt_outlined, size: 80, color: Colors.red),
+            const SizedBox(height: 20),
+            Text(
+              _cameraError ?? 'خطأ في الكاميرا',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+              icon: const Icon(Icons.refresh),
+              label: const Text('إعادة المحاولة'),
+              onPressed: () {
+                setState(() {
+                  _cameraError = null;
+                  _cameraReady = false;
+                });
+                _initCamera();
+              },
+            ),
+            const SizedBox(height: 12),
+            TextButton.icon(
+              icon: const Icon(Icons.keyboard, color: Colors.white70),
+              label: const Text(
+                'إدخال المعرف يدوياً',
+                style: TextStyle(color: Colors.white70),
+              ),
+              onPressed: _askManualEntry,
+            ),
+          ],
+        ),
       ),
     );
   }

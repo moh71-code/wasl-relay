@@ -79,12 +79,12 @@ class StorageService {
   }
 
   Future<Map<String, dynamic>> getRelayConfig() async {
-    final host = await _storage.read(key: 'relay_host') ?? '127.0.0.1';
-    final portStr = await _storage.read(key: 'relay_port') ?? '8765';
-    final wssStr = await _storage.read(key: 'relay_wss') ?? 'false';
+    final host = await _storage.read(key: 'relay_host') ?? 'wasl-rela.onrender.com';
+    final portStr = await _storage.read(key: 'relay_port') ?? '443';
+    final wssStr = await _storage.read(key: 'relay_wss') ?? 'true';
     return {
       'host': host,
-      'port': int.tryParse(portStr) ?? 8765,
+      'port': int.tryParse(portStr) ?? 443,
       'useWss': wssStr == 'true',
     };
   }

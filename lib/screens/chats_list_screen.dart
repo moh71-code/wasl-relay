@@ -60,6 +60,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           t == 'delivery_ack' ||
           t == 'file_received') {
         await _loadContacts();
+      } else if (t == 'pair_request') {
+        final recipient = data['recipient_id'];
+        if (recipient == widget.currentUserId) {
+          await _handleIncomingPairingRequest(data);
+        }
+      } else if (t == 'pair_accept') {
+        await _loadContacts();
       }
     });
     await _loadContacts();
