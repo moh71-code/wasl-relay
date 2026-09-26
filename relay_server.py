@@ -162,7 +162,7 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
 
             # Authenticated registration (challenge-response)
             if msg_type == "register":
-                uid = str(data.get("user_id", "")).strip()
+                uid = str(data.get("user_id", "")).strip().upper()
                 pub_b64 = str(data.get("public_key", ""))
                 sig_b64 = str(data.get("signature", ""))
                 echoed = str(data.get("nonce", ""))
@@ -201,6 +201,12 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                 active_clients[uid] = websocket
                 logger.info("Authenticated register: %s (active=%d)",
                             _uid(uid), len(active_clients))
+
+                # Confirm auth BEFORE flushing — the client only starts
+                # sending app frames once it sees 'registered', closing the
+                # race where pre-auth frames were silently dropped.
+                await websocket.send_text(json.dumps({"type": "registered"}))
+
                 await _flush_queue(uid, websocket)
                 continue
 
@@ -211,6 +217,7 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
             # Delete for everyone — also purge from offline queue
             if msg_type == "delete_message":
                 recipient_id = data.get("recipient_id")
+                recipient_id = recipient_id.strip().upper() if recipient_id else None
                 msg_uuid = data.get("message_uuid", "")
                 if recipient_id and msg_uuid and recipient_id in offline_queue:
                     offline_queue[recipient_id] = [
@@ -224,6 +231,7 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
             # Route all other messages (chat, ack, file_chunk, pair_request, ...)
             recipient_id = data.get("recipient_id")
             if recipient_id:
+                recipient_id = str(recipient_id).strip().upper()
                 await _deliver(recipient_id, raw, msg_type)
 
     except WebSocketDisconnect:
