@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase config — contains project keys; added per-device, not committed
+google-services.json
+GoogleService-Info.plist
