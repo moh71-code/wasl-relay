@@ -109,4 +109,5 @@ async def main():
     await test_local("ws://127.0.0.1:8765")
     await test_render()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

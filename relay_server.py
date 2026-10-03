@@ -43,6 +43,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wasl_relay")
 
+# ── Firebase Cloud Messaging (push wake-up) ─────────────────────────────────
+# Optional: enabled when FIREBASE_SERVICE_ACCOUNT holds the service-account
+# JSON (Render secret env var). Pushes are data-only {type:"wake"} nudges —
+# they never carry sender ids, ciphertext, or any metadata.
+_FCM_READY = False
+try:
+    import firebase_admin
+    from firebase_admin import credentials as _fb_credentials
+    from firebase_admin import messaging as _fb_messaging
+
+    _sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT", "")
+    if _sa_json.strip():
+        firebase_admin.initialize_app(
+            _fb_credentials.Certificate(json.loads(_sa_json)))
+        _FCM_READY = True
+        logger.info("FCM push wake-up enabled")
+except ImportError:
+    logger.warning("firebase-admin missing — push wake-up disabled")
+except Exception as e:
+    logger.error("FCM init failed: %s", e)
+
 app = FastAPI(title="WASL E2EE Relay", docs_url=None, redoc_url=None)
 
 # user_id -> WebSocket (only AUTHENTICATED clients live here)
@@ -54,6 +75,16 @@ user_bindings: Dict[str, str] = {}
 
 # Ephemeral offline queue: user_id -> [(unix_ts, raw JSON string)] (RAM only)
 offline_queue: Dict[str, List[Tuple[float, str]]] = collections.defaultdict(list)
+
+# user_id -> FCM device token (RAM only; clients re-push it on every connect)
+fcm_tokens: Dict[str, str] = {}
+
+# Frame types that must NOT wake the recipient's device — acks, typing
+# indicators and control frames are silently queued/delivered only.
+_SILENT_TYPES = {
+    "ping", "pong", "delivery_ack", "read_ack", "typing",
+    "delete_message", "fcm_token",
+}
 
 MAX_QUEUE = 300
 
@@ -97,6 +128,46 @@ def _verify_register(user_id: str, public_key_b64: str, nonce: str,
         return False
 
 
+async def _send_wake_push(recipient_id: str, token: str) -> None:
+    """Send a content-free high-priority data push that wakes the app.
+
+    The payload is only {"type": "wake"} — no sender, no metadata — so the
+    zero-knowledge property holds even through Google's push channel.
+    """
+    try:
+        message = _fb_messaging.Message(
+            token=token,
+            data={"type": "wake"},
+            android=_fb_messaging.AndroidConfig(priority="high"),
+            apns=_fb_messaging.APNSConfig(
+                headers={"apns-priority": "5"},
+                payload=_fb_messaging.APNSPayload(
+                    aps=_fb_messaging.Aps(content_available=True)),
+            ),
+        )
+        await asyncio.to_thread(_fb_messaging.send, message)
+        logger.info("Sent wake push to %s", _uid(recipient_id))
+    except Exception as e:
+        if "Unregistered" in type(e).__name__ or "NotRegistered" in str(e):
+            # Token gone stale — stop paying FCM calls for a dead device.
+            fcm_tokens.pop(recipient_id, None)
+            logger.info("Dropped stale FCM token for %s", _uid(recipient_id))
+        else:
+            logger.warning("Wake push failed for %s: %s",
+                           _uid(recipient_id), type(e).__name__)
+
+
+def _maybe_wake(recipient_id: str, msg_type: str) -> None:
+    """Fire-and-forget wake push when buffering a real message for an
+    offline user. Throttled: only fires on the FIRST item entering an
+    empty queue — the rest ride the same wake (queue flushes whole)."""
+    if not _FCM_READY or msg_type in _SILENT_TYPES:
+        return
+    token = fcm_tokens.get(recipient_id)
+    if token:
+        asyncio.create_task(_send_wake_push(recipient_id, token))
+
+
 async def _deliver(recipient_id: str, payload: str, msg_type: str = "msg") -> bool:
     """Try to deliver to connected client, else buffer in RAM queue."""
     ws = active_clients.get(recipient_id)
@@ -111,9 +182,12 @@ async def _deliver(recipient_id: str, payload: str, msg_type: str = "msg") -> bo
     _prune_queue(recipient_id)
     q = offline_queue[recipient_id]
     if len(q) < MAX_QUEUE:
+        was_empty = not q
         q.append((time.time(), payload))
         logger.info("Buffered [%s] for offline %s (queue=%d)",
                     msg_type, _uid(recipient_id), len(q))
+        if was_empty:
+            _maybe_wake(recipient_id, msg_type)
     else:
         logger.warning("Queue full for %s, dropping [%s]",
                        _uid(recipient_id), msg_type)
@@ -212,6 +286,13 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
 
             # Everything below requires an authenticated registration.
             if not authenticated:
+                continue
+
+            # Push wake-up token — bound to the authenticated user_id.
+            if msg_type == "fcm_token":
+                token = str(data.get("token", "")).strip()
+                if token and current_user_id:
+                    fcm_tokens[current_user_id] = token
                 continue
 
             # Delete for everyone — also purge from offline queue
