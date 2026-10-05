@@ -1,0 +1,9 @@
+# Replace SERVER_IP with your VPS public IP — sslip.io gives a free
+# domain like 203.0.113.10.sslip.io so Let's Encrypt issues a real
+# TLS certificate with zero domain purchase.
+#
+# If you own a domain later, just replace the address with it.
+
+{$WASL_DOMAIN:localhost} {
+    reverse_proxy relay:8080
+}

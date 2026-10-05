@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/l10n/s.dart';
 import 'package:flutter/services.dart';
 import '../core/crypto/pairing_service.dart';
 import '../core/storage/storage_service.dart';
@@ -63,7 +64,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('WASL - هوية مشفرة مجهولة'),
+        title:       Text(S.loginTitle),
         centerTitle: true,
         backgroundColor: Colors.teal,
         foregroundColor: Colors.white,
@@ -75,13 +76,13 @@ class _LoginScreenState extends State<LoginScreen> {
           children: [
             const Icon(Icons.security, size: 90, color: Colors.teal),
             const SizedBox(height: 20),
-            const Text(
-              'هويتك التشفيرية الخاصة',
+                  Text(
+              S.yourIdentity,
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 10),
-            const Text(
-              'تم إنشاء عنوانك التشفيري المحلي بنجاح. لا يتطلب التطبيق أي رقم هاتف أو صلاحيات لجهات الاتصال.',
+                  Text(
+              S.identityCreated,
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey),
             ),
@@ -111,7 +112,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     onPressed: () {
                       Clipboard.setData(ClipboardData(text: _myCryptoId ?? ''));
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('تم نسخ معرّفك المشفر')),
+                              SnackBar(content: Text(S.idCopied)),
                       );
                     },
                   ),
@@ -125,8 +126,8 @@ class _LoginScreenState extends State<LoginScreen> {
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
                 onPressed: _enterApp,
-                child: const Text(
-                  'الدخول إلى المحادثات',
+                child:       Text(
+                  S.enterChats,
                   style: TextStyle(fontSize: 18, color: Colors.white),
                 ),
               ),

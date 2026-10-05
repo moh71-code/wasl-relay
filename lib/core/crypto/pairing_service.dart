@@ -26,6 +26,7 @@ class PairingService {
     String? requestId,
     String? challenge,
     int? expiresAt,
+    String? displayName,
   }) => <String, dynamic>{
         'type': type,
         'sender_id': senderId,
@@ -35,6 +36,25 @@ class PairingService {
         if (requestId != null) 'request_id': requestId,
         if (challenge != null) 'challenge': challenge,
         if (expiresAt != null) 'expires_at': expiresAt,
+        if (displayName != null && displayName.trim().isNotEmpty)
+          'display_name': displayName.trim(),
+      };
+
+  /// Canonical form for signed control signals (delete_message, ...).
+  /// Fixed key order guarantees sender and receiver serialize the exact
+  /// bytes that were signed.
+  static Map<String, dynamic> canonicalControlPayload({
+    required String type,
+    required String senderId,
+    required String recipientId,
+    required String messageUuid,
+    int? timestamp,
+  }) => <String, dynamic>{
+        'type': type,
+        'sender_id': senderId,
+        'recipient_id': recipientId,
+        'message_uuid': messageUuid,
+        if (timestamp != null) 'timestamp': timestamp,
       };
 
   Future<void> ensureIdentityKeys(String userId) async {
@@ -92,36 +112,43 @@ class PairingService {
     required String peerId,
     required List<int> peerXPublicBytes,
   }) async {
+    final cleanMy = myUserId.trim().toUpperCase();
+    final cleanPeer = peerId.trim().toUpperCase();
     if (peerXPublicBytes.length != 32) throw FormatException('Invalid X25519 public key');
-    final myXb64 = await _storage.getXPrivateKey(myUserId);
-    if (myXb64 == null) throw StateError('No X25519 private key for $myUserId');
+    final myXb64 = await _storage.getXPrivateKey(cleanMy);
+    if (myXb64 == null) throw StateError('No X25519 private key for $cleanMy');
     final myPair = await _x.newKeyPairFromSeed(base64.decode(myXb64));
     final sharedSecret = await _x.sharedSecretKey(
       keyPair: myPair,
       remotePublicKey: SimplePublicKey(peerXPublicBytes, type: KeyPairType.x25519),
     );
+    // Deterministic mutual session key: Sort user IDs so both Alice and Bob compute the EXACT SAME HKDF info
+    final sorted = [cleanMy, cleanPeer]..sort();
     final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
     final sessionKey = await hkdf.deriveKey(
       secretKey: sharedSecret,
-      info: utf8.encode('wasl-session-v1:$myUserId:$peerId'),
+      info: utf8.encode('wasl-session-v1:${sorted[0]}:${sorted[1]}'),
     );
     final keyBytes = await sessionKey.extractBytes();
-    await _storage.saveSessionKey(myUserId, peerId, base64Encode(keyBytes));
+    await _storage.saveSessionKey(cleanMy, cleanPeer, base64Encode(keyBytes));
     return keyBytes;
   }
 
   Future<void> sendPairRequest({required String myId, required String targetId}) async {
-    await ensureIdentityKeys(myId);
-    final pubs = await getLocalPublicKeys(myId);
+    final cleanMy = myId.trim().toUpperCase();
+    final cleanTarget = targetId.trim().toUpperCase();
+    await ensureIdentityKeys(cleanMy);
+    final pubs = await getLocalPublicKeys(cleanMy);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     final expiresAt = DateTime.now().add(const Duration(minutes: 5)).millisecondsSinceEpoch;
     final payload = canonicalPayload(
-      type: 'pair_request', senderId: myId, recipientId: targetId,
+      type: 'pair_request', senderId: cleanMy, recipientId: cleanTarget,
       x25519: pubs['x25519']!, ed25519: pubs['ed25519']!,
       requestId: requestId, challenge: base64UrlEncode(List<int>.generate(32, (_) => Random.secure().nextInt(256))),
       expiresAt: expiresAt,
+      displayName: await _storage.getDisplayName(),
     );
-    final signature = await sign(myId, utf8.encode(jsonEncode(payload)));
+    final signature = await sign(cleanMy, utf8.encode(jsonEncode(payload)));
     WebSocketService().sendData({...payload, 'signature': base64Encode(signature)});
   }
 
@@ -129,29 +156,56 @@ class PairingService {
       {String? expectedRecipientId}) async {
     try {
       if (data['type'] != 'pair_accept') return false;
-      final sender = data['sender_id'] as String;
-      final recipient = data['recipient_id'] as String;
-      if (expectedRecipientId != null && recipient != expectedRecipientId) return false;
+      final sender = (data['sender_id'] as String).trim().toUpperCase();
+      final recipient = (data['recipient_id'] as String).trim().toUpperCase();
+      if (expectedRecipientId != null && recipient != expectedRecipientId.trim().toUpperCase()) return false;
       final edPubB64 = data['ed25519'] as String;
       final xPubB64 = data['x25519'] as String;
       final sigB64 = data['signature'] as String?;
       if (sigB64 == null) return false;
+      final expiresAt = (data['expires_at'] as num?)?.toInt();
+      if (expiresAt != null &&
+          DateTime.now().millisecondsSinceEpoch > expiresAt) {
+        debugPrint('Pair accept expired for sender: $sender');
+        return false;
+      }
       final payload = canonicalPayload(
         type: 'pair_accept', senderId: sender, recipientId: recipient,
         x25519: xPubB64, ed25519: edPubB64,
         requestId: data['request_id'] as String?,
         challenge: data['challenge'] as String?,
-        expiresAt: data['expires_at'] as int?,
+        expiresAt: (data['expires_at'] as num?)?.toInt(),
+        displayName: data['display_name'] as String?,
       );
       final verified = await verify(utf8.encode(jsonEncode(payload)),
           base64.decode(sigB64), base64.decode(edPubB64));
-      if (!verified) return false;
+      if (!verified) {
+        debugPrint('Pair accept signature verification failed for sender: $sender');
+        return false;
+      }
+
+      // Never rotate keys for an already-paired contact — a different key
+      // claiming an existing sender_id is an impersonation attempt. A
+      // legitimate device migration must re-pair from scratch.
+      final existingEd = await _storage.getEdPublicKey(sender);
+      if (existingEd != null && existingEd != edPubB64) {
+        debugPrint('Rejected key rotation for existing contact: $sender');
+        return false;
+      }
+
+      // Save peer public keys
+      await _storage.saveEdPublicKey(sender, edPubB64);
+      await _storage.saveXPublicKey(sender, xPubB64);
+
+      // Derive and store mutual session key
       await deriveAndStoreSessionKey(
-        myUserId: recipient, peerId: sender,
-        peerXPublicBytes: base64.decode(xPubB64));
+        myUserId: recipient,
+        peerId: sender,
+        peerXPublicBytes: base64.decode(xPubB64),
+      );
       return true;
     } catch (e) {
-      if (kDebugMode) debugPrint('Pair accept handling failed: $e');
+      debugPrint('Pair accept handling failed: $e');
       return false;
     }
   }

@@ -53,6 +53,12 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<key>NSCameraUsageDescription</key>
+	<string>هذا التطبيق يحتاج للوصول إلى الكاميرا لمسح رموز QR للتبادل المشفر الآمن</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>هذا التطبيق يحتاج للوصول إلى الصور لإرسال الملفات المشفرة</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>هذا التطبيق يحتاج للوصول إلى الميكروفون لتسجيل الرسائل الصوتية المشفرة</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

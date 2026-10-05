@@ -6,65 +6,95 @@ class StorageService {
   StorageService._internal();
 
   final _storage = const FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
 
+  static String _norm(String id) => id.trim().toUpperCase();
+
   // User identity
   Future<void> saveUserId(String userId) async {
-    await _storage.write(key: 'user_id', value: userId);
+    await _storage.write(key: 'user_id', value: _norm(userId));
   }
 
   Future<String?> getUserId() async {
-    return await _storage.read(key: 'user_id');
+    final val = await _storage.read(key: 'user_id');
+    return val != null ? _norm(val) : null;
+  }
+
+  // Human-readable display name shown to paired peers
+  Future<void> saveDisplayName(String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    await _storage.write(key: 'display_name', value: trimmed);
+  }
+
+  Future<String?> getDisplayName() async {
+    final val = await _storage.read(key: 'display_name');
+    if (val == null) return null;
+    final trimmed = val.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   // Ed25519 identity keys (Signing & Verification)
   Future<void> saveEdPrivateKey(String userId, String b64) async {
-    await _storage.write(key: 'ed_priv_$userId', value: b64);
+    await _storage.write(key: 'ed_priv_${_norm(userId)}', value: b64);
   }
 
   Future<String?> getEdPrivateKey(String userId) async {
-    return await _storage.read(key: 'ed_priv_$userId');
+    return await _storage.read(key: 'ed_priv_${_norm(userId)}');
   }
 
   Future<void> saveEdPublicKey(String userId, String b64) async {
-    await _storage.write(key: 'ed_pub_$userId', value: b64);
+    await _storage.write(key: 'ed_pub_${_norm(userId)}', value: b64);
   }
 
   Future<String?> getEdPublicKey(String userId) async {
-    return await _storage.read(key: 'ed_pub_$userId');
+    return await _storage.read(key: 'ed_pub_${_norm(userId)}');
   }
 
   // X25519 key exchange keys (Diffie-Hellman)
   Future<void> saveXPrivateKey(String userId, String b64) async {
-    await _storage.write(key: 'x_priv_$userId', value: b64);
+    await _storage.write(key: 'x_priv_${_norm(userId)}', value: b64);
   }
 
   Future<String?> getXPrivateKey(String userId) async {
-    return await _storage.read(key: 'x_priv_$userId');
+    return await _storage.read(key: 'x_priv_${_norm(userId)}');
   }
 
   Future<void> saveXPublicKey(String userId, String b64) async {
-    await _storage.write(key: 'x_pub_$userId', value: b64);
+    await _storage.write(key: 'x_pub_${_norm(userId)}', value: b64);
   }
 
   Future<String?> getXPublicKey(String userId) async {
-    return await _storage.read(key: 'x_pub_$userId');
+    return await _storage.read(key: 'x_pub_${_norm(userId)}');
   }
 
   // Session keys derived per contact
   Future<void> saveSessionKey(
       String myUserId, String peerId, String b64) async {
-    await _storage.write(key: 'session_${myUserId}_$peerId', value: b64);
+    await _storage.write(key: 'session_${_norm(myUserId)}_${_norm(peerId)}', value: b64);
   }
 
   Future<String?> getSessionKey(String myUserId, String peerId) async {
-    return await _storage.read(key: 'session_${myUserId}_$peerId');
+    return await _storage.read(key: 'session_${_norm(myUserId)}_${_norm(peerId)}');
   }
 
   Future<void> deleteSessionKey(String myUserId, String peerId) async {
-    await _storage.delete(key: 'session_${myUserId}_$peerId');
+    await _storage.delete(key: 'session_${_norm(myUserId)}_${_norm(peerId)}');
+  }
+
+  // Shared AES-256 group keys (distributed per-member over pairwise channels)
+  Future<void> saveGroupKey(String groupId, String b64) async {
+    await _storage.write(key: 'group_key_${_norm(groupId)}', value: b64);
+  }
+
+  Future<String?> getGroupKey(String groupId) async {
+    return await _storage.read(key: 'group_key_${_norm(groupId)}');
+  }
+
+  Future<void> deleteGroupKey(String groupId) async {
+    await _storage.delete(key: 'group_key_${_norm(groupId)}');
   }
 
   // Relay server settings
@@ -132,5 +162,20 @@ class StorageService {
   /// Secure Zeroize: Irreversibly wipe all cryptographic keys and credentials
   Future<void> wipeAllSecureKeys() async {
     await _storage.deleteAll();
+  }
+
+  // App-lock PIN (stored as salted SHA-256, never the raw PIN)
+  static const String _pinKey = 'app_pin_hash_v1';
+
+  Future<void> savePinHash(String saltedHash) async {
+    await _storage.write(key: _pinKey, value: saltedHash);
+  }
+
+  Future<String?> getPinHash() async {
+    return await _storage.read(key: _pinKey);
+  }
+
+  Future<void> clearPin() async {
+    await _storage.delete(key: _pinKey);
   }
 }
