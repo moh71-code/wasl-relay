@@ -88,6 +88,14 @@ _SILENT_TYPES = {
 
 MAX_QUEUE = 300
 
+# Per-recipient queued bytes cap — file frames can be large (offline_file
+# embeds a whole file) so a count cap alone cannot bound RAM growth.
+MAX_QUEUE_BYTES = 64 * 1024 * 1024
+
+# Hard frame size cap — matches the per-recipient queue byte budget, so an
+# offline_file envelope (~47MB raw → ~64MB base64) is the largest legit frame.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
 # Queued ciphertexts expire after 24 hours — recipients who never come online
 # must not accumulate data in RAM forever.
 QUEUE_TTL_SECONDS = 24 * 60 * 60
@@ -181,7 +189,8 @@ async def _deliver(recipient_id: str, payload: str, msg_type: str = "msg") -> bo
     q = offline_queue[recipient_id]
     _prune_queue(recipient_id)
     q = offline_queue[recipient_id]
-    if len(q) < MAX_QUEUE:
+    queued_bytes = sum(len(entry[1]) for entry in q)
+    if len(q) < MAX_QUEUE and queued_bytes + len(payload) <= MAX_QUEUE_BYTES:
         was_empty = not q
         q.append((time.time(), payload))
         logger.info("Buffered [%s] for offline %s (queue=%d)",
@@ -220,6 +229,9 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
 
     try:
         async for raw in websocket.iter_text():
+            if len(raw) > MAX_FRAME_BYTES:
+                logger.warning("Oversized frame dropped (%d bytes)", len(raw))
+                continue
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -287,6 +299,15 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
             # Everything below requires an authenticated registration.
             if not authenticated:
                 continue
+
+            # Zero-trust: the relay OWNS sender identity. A client can never
+            # claim to be another user_id — overwrite sender_id with the
+            # authenticated identity and re-serialize what we forward, so a
+            # forged sender_id can never reach a recipient (spoofed acks,
+            # fake pair_accept key rotation, premature-expiry read_ack).
+            if "sender_id" in data:
+                data["sender_id"] = current_user_id
+                raw = json.dumps(data)
 
             # Push wake-up token — bound to the authenticated user_id.
             if msg_type == "fcm_token":
