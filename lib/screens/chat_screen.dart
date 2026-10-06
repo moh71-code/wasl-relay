@@ -1088,29 +1088,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Decrypts a file attachment and writes it to a readable location so the
-  /// user can open it with another app.
-  Future<void> _openEncryptedFile(String fileRef, String fileName) async {
+  /// Decrypts media in memory then streams it to ANY destination the user
+  /// picks via SAF — USB OTG flash, SD card, Downloads, cloud providers —
+  /// without leaving a plaintext copy in app storage. No permission needed.
+  Future<void> _exportMediaFile(String fileRef, String fileName) async {
     final plain = await _decryptMediaBytes(fileRef);
     if (!mounted) return;
     if (plain == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(S.decryptFileFailed)));
+              SnackBar(content: Text(S.decryptFileFailed)));
       return;
     }
     try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final safeName = fileName.isEmpty ? 'wasl_file' : fileName;
-      final out = File('${appDir.path}/opened_$safeName');
-      await out.writeAsBytes(plain, flush: true);
+      final saved = await FilePicker.saveFile(
+        dialogTitle: S.saveToExternal,
+        fileName: fileName.isEmpty ? 'wasl_file' : fileName,
+        bytes: plain,
+      );
+      if (!mounted || saved == null) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(S.fileSaved)));
+    } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(S.fileSavedTo(out.path))),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(S.fileSaveFailed(e))));
+              SnackBar(content: Text(S.fileExportFailed)));
     }
   }
 
@@ -1306,6 +1307,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     Clipboard.setData(ClipboardData(text: msg['content'] ?? ''));
                     ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(content: Text(S.copied)),
+                    );
+                  },
+                ),
+              if (!isDeleted && !isText &&
+                  (msg['file_path']?.toString().isNotEmpty ?? false))
+                ListTile(
+                  leading: const Icon(Icons.save_alt_rounded,
+                      color: WaslColors.primary),
+                  title: Text(S.saveToExternal),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _exportMediaFile(
+                      msg['file_path'].toString(),
+                      WaslMedia.displayName(
+                          msg['content']?.toString() ?? ''),
                     );
                   },
                 ),
@@ -1582,7 +1598,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final filePath = msg['file_path']?.toString();
       final canOpen = filePath != null && filePath.isNotEmpty;
       return GestureDetector(
-        onTap: canOpen ? () => _openEncryptedFile(filePath, rawName) : null,
+        onTap: canOpen ? () => _exportMediaFile(filePath, rawName) : null,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [

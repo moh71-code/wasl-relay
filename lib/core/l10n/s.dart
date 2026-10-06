@@ -93,10 +93,40 @@ class S {
       isAr ? 'تعذر تشغيل الصوت: $e' : 'Cannot play audio: $e';
   static String get decryptFileFailed =>
       isAr ? 'تعذر فتح الملف' : 'Could not open file';
-  static String fileSavedTo(String path) =>
-      isAr ? 'تم حفظ الملف في:\n$path' : 'File saved to:\n$path';
-  static String fileSaveFailed(Object e) =>
-      isAr ? 'تعذر حفظ الملف: $e' : 'Could not save file: $e';
+  static String get saveToExternal =>
+      isAr ? 'حفظ إلى تخزين خارجي' : 'Save to external storage';
+  static String get fileSaved =>
+      isAr ? 'تم حفظ الملف' : 'File saved';
+  static String get fileExportFailed =>
+      isAr ? 'تعذر حفظ الملف' : 'Could not save file';
+
+  // ─── App updates ───
+  static String get appUpdates => isAr ? 'تحديثات التطبيق' : 'App updates';
+  static String get checkForUpdates =>
+      isAr ? 'التحقق من التحديثات' : 'Check for updates';
+  static String get checkingUpdates =>
+      isAr ? 'جارٍ التحقق من التحديثات…' : 'Checking for updates…';
+  static String get upToDate =>
+      isAr ? 'التطبيق محدَّث لأحدث إصدار' : 'App is up to date';
+  static String get updateCheckFailed =>
+      isAr ? 'تعذر التحقق من التحديثات' : 'Update check failed';
+  static String get updateAvailable =>
+      isAr ? 'تحديث جديد متوفر' : 'Update available';
+  static String get updateAvailableBody =>
+      isAr ? 'إصدار جديد من وصل — افتح الإعدادات للتحديث'
+          : 'A new WASL release — open Settings to update';
+  static String updateVersion(String v) =>
+      isAr ? 'الإصدار الجديد: $v' : 'New version: $v';
+  static String currentVersion(String v) =>
+      isAr ? 'الإصدار الحالي: $v' : 'Current version: $v';
+  static String get downloadAndInstall =>
+      isAr ? 'تنزيل وتثبيت' : 'Download & install';
+  static String downloadingUpdate(int pct) =>
+      isAr ? 'جارٍ تنزيل التحديث… $pct%' : 'Downloading update… $pct%';
+  static String get installUpdate =>
+      isAr ? 'تثبيت التحديث' : 'Install update';
+  static String get updateDownloadFailed =>
+      isAr ? 'فشل تنزيل التحديث' : 'Update download failed';
   static String get connecting =>
       isAr ? 'جارٍ الاتصال بالخادم الترحيلي...' : 'Connecting to relay server…';
   static String get offlineQueue => isAr

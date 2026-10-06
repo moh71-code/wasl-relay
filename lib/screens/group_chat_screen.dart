@@ -285,7 +285,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     } catch (_) {}
   }
 
-  Future<void> _openFile(String fileRef, String fileName) async {
+  /// Decrypts group media in memory then streams it to ANY destination the
+  /// user picks via SAF — USB OTG flash, SD card, Downloads, cloud providers —
+  /// without leaving a plaintext copy in app storage. No permission needed.
+  Future<void> _exportGroupFile(String fileRef, String fileName) async {
     final plain = await _decryptGroupMedia(fileRef);
     if (!mounted) return;
     if (plain == null) {
@@ -294,15 +297,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return;
     }
     try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final out = File(
-          '${appDir.path}/opened_${fileName.isEmpty ? 'wasl_file' : fileName}');
-      await out.writeAsBytes(plain, flush: true);
+      final saved = await FilePicker.saveFile(
+        dialogTitle: S.saveToExternal,
+        fileName: fileName.isEmpty ? 'wasl_file' : fileName,
+        bytes: plain,
+      );
+      if (!mounted || saved == null) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(S.fileSaved)));
+    } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(S.fileSavedTo(out.path))),
-      );
-    } catch (_) {}
+              SnackBar(content: Text(S.fileExportFailed)));
+    }
   }
 
   String _formatTime(dynamic ts) {
@@ -569,7 +576,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final rawName = WaslMedia.displayName(content);
       final canOpen = fileRef != null && fileRef.isNotEmpty;
       return GestureDetector(
-        onTap: canOpen ? () => _openFile(fileRef, rawName) : null,
+        onTap: canOpen ? () => _exportGroupFile(fileRef, rawName) : null,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [

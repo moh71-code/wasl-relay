@@ -22,6 +22,11 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Required so the app can trigger the package installer when the user
+         chooses "Install" for an in-app update. The user still approves
+         "install from this source" once — no silent installs. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:label="WASL"
         android:name="${applicationName}"

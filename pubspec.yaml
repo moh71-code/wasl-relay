@@ -1,7 +1,7 @@
 name: wasl_app
 description: "WASL - Secure & Anonymous E2EE Instant Messenger"
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -32,6 +32,9 @@ dependencies:
   flutter_local_notifications: ^19.0.0
   firebase_core: ^4.15.0
   firebase_messaging: ^16.7.0
+  package_info_plus: 10.0.0
+  http: 1.6.0
+  open_filex: 4.7.0
 
 dev_dependencies:
   flutter_lints: ^5.0.0

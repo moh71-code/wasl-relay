@@ -164,6 +164,13 @@ class StorageService {
     await _storage.deleteAll();
   }
 
+  // Update-check throttle timestamp (ms since epoch).
+  Future<int> getLastUpdateCheck() async =>
+      int.tryParse(await _storage.read(key: 'last_update_check') ?? '0') ?? 0;
+
+  Future<void> setLastUpdateCheck(int ms) async =>
+      _storage.write(key: 'last_update_check', value: ms.toString());
+
   // App-lock PIN (stored as salted SHA-256, never the raw PIN)
   static const String _pinKey = 'app_pin_hash_v1';
 

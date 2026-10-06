@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../core/l10n/s.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import '../core/database/database_helper.dart';
+import '../core/network/update_service.dart';
 import '../core/storage/storage_service.dart';
 import '../core/theme/app_theme.dart';
 import '../core/theme/wasl_theme.dart';
@@ -19,6 +22,10 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   String? _userId;
+  String _appVersion = '';
+  bool _checkingUpdate = false;
+  double? _updateProgress; // null = not downloading
+  File? _downloadedApk;
 
   @override
   void initState() {
@@ -26,6 +33,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
     StorageService().getUserId().then((id) {
       if (mounted) setState(() => _userId = id);
     });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _appVersion = info.version);
+    });
+    UpdateService.pending.addListener(_onPendingUpdate);
+  }
+
+  @override
+  void dispose() {
+    UpdateService.pending.removeListener(_onPendingUpdate);
+    super.dispose();
+  }
+
+  void _onPendingUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _checkUpdates() async {
+    if (_checkingUpdate) return;
+    setState(() {
+      _checkingUpdate = true;
+      _downloadedApk = null;
+    });
+    final update = await UpdateService.checkForUpdate();
+    if (!mounted) return;
+    setState(() => _checkingUpdate = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(update == null ? S.upToDate : S.updateAvailable),
+    ));
+  }
+
+  Future<void> _downloadUpdate() async {
+    if (_updateProgress != null) return;
+    setState(() => _updateProgress = 0.0);
+    try {
+      final apk = await UpdateService.downloadApk(
+          (p) => mounted ? setState(() => _updateProgress = p) : null);
+      if (!mounted) return;
+      setState(() {
+        _updateProgress = null;
+        _downloadedApk = apk;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _updateProgress = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(S.updateDownloadFailed)),
+      );
+    }
   }
 
   /// Clears every chat's messages and media while keeping contacts,
@@ -803,7 +858,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 
                 AppWidgets.premiumDivider(),
-                
+
+                // Section 5b: App updates (self-update via GitHub Releases)
+                _buildSectionHeader(S.appUpdates),
+                const SizedBox(height: AppTheme.spacingSmall),
+
+                AppWidgets.premiumCard(
+                  child: Column(
+                    children: [
+                      _buildSettingTile(
+                        icon: Icons.system_update_alt_rounded,
+                        title: S.checkForUpdates,
+                        subtitle: _checkingUpdate
+                            ? S.checkingUpdates
+                            : S.currentVersion(_appVersion),
+                        trailing: _checkingUpdate
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2),
+                              )
+                            : Icon(Icons.refresh_rounded,
+                                color: WaslColors.mutedFg(context)),
+                        onTap: _checkingUpdate ? null : _checkUpdates,
+                      ),
+                      if (UpdateService.pending.value != null) ...[
+                        AppWidgets.premiumDivider(),
+                        _buildUpdateCard(UpdateService.pending.value!),
+                      ],
+                    ],
+                  ),
+                ),
+
+                AppWidgets.premiumDivider(),
+
                 // Section 6: Clear chat content (keeps contacts & groups)
                 AppWidgets.premiumCard(
                   onTap: () => _showClearChatsDialog(context),
@@ -915,6 +1004,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
   
+  /// Card shown when a newer release exists: version, notes, and a
+  /// download → install flow driven by [UpdateService].
+  Widget _buildUpdateCard(WaslUpdate update) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          vertical: AppTheme.spacingSmall,
+          horizontal: AppTheme.spacingSmall),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.new_releases_rounded,
+                    color: Colors.green, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      S.updateAvailable,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.green,
+                      ),
+                    ),
+                    Text(
+                      S.updateVersion(update.versionName),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: WaslColors.mutedFg(context),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (update.notes.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              update.notes,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: WaslColors.mutedFg(context),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          if (_updateProgress != null) ...[
+            LinearProgressIndicator(
+              value: _updateProgress,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              S.downloadingUpdate((_updateProgress! * 100).round()),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: WaslColors.mutedFg(context),
+              ),
+            ),
+          ] else
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _downloadedApk != null
+                    ? () => UpdateService.install(_downloadedApk!)
+                    : _downloadUpdate,
+                icon: Icon(_downloadedApk != null
+                    ? Icons.install_mobile_rounded
+                    : Icons.download_rounded),
+                label: Text(_downloadedApk != null
+                    ? S.installUpdate
+                    : S.downloadAndInstall),
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.primaryColor,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSectionHeader(String title) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppTheme.spacingSmall),

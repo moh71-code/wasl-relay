@@ -9,6 +9,7 @@ import 'core/crypto/pairing_service.dart';
 import 'core/database/database_helper.dart';
 import 'core/network/websocket_service.dart';
 import 'core/network/push_service.dart';
+import 'core/network/update_service.dart';
 import 'core/network/message_ingestion_service.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/storage/storage_service.dart';
@@ -63,6 +64,9 @@ void main() async {
       serverPort: relayConfig['port'] as int,
       useWss: relayConfig['useWss'] as bool,
     );
+
+    // فحص التحديثات مرة كل 24 ساعة — طلب GET صغير، بلا بيانات مستخدم
+    UpdateService.autoCheck();
 
     runApp(
       MultiProvider(

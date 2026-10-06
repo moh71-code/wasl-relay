@@ -56,6 +56,30 @@ class NotificationService {
     }
   }
 
+  /// Generic update notification — the user opens Settings to act on it.
+  Future<void> notifyUpdateAvailable() async {
+    if (!_initialized) return;
+    try {
+      final details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channelId,
+          _channelName,
+          channelDescription: _channelDesc,
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      );
+      await _plugin.show(
+        _notificationId++,
+        S.updateAvailable,
+        S.updateAvailableBody,
+        details,
+      );
+    } catch (e) {
+      debugPrint('NotificationService update notification failed: $e');
+    }
+  }
+
   /// Show a generic, content-free notification for a newly ingested message.
   /// Callers must not pass message content or sender details.
   Future<void> notifyNewMessage() async {
