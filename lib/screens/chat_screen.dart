@@ -80,6 +80,16 @@ class _ChatScreenState extends State<ChatScreen> {
     _selectedTtlMs = priv['defaultEphemeralTtl'] as int?;
     _selectedExpireTrigger = priv['defaultEphemeralTrigger'] as String? ?? 'send';
 
+    // Per-chat override wins over the global default — a non-null trigger
+    // means the user explicitly configured THIS chat (even as "off").
+    final chatEph =
+        await DatabaseHelper.instance.getChatEphemeral(widget.recipientId);
+    if (chatEph != null) {
+      _selectedTtlMs = (chatEph['ephemeral_ttl_ms'] as num?)?.toInt();
+      _selectedExpireTrigger =
+          chatEph['ephemeral_trigger']?.toString() ?? 'send';
+    }
+
     _connectionStatus = WebSocketService().connectionState;
 
     _statusSubscription = WebSocketService().statusStream.listen((status) {
@@ -1504,6 +1514,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       _selectedTtlMs = tempTtl;
                       _selectedExpireTrigger = tempTrigger;
                     });
+                    // Persist per-chat so the choice survives reopening —
+                    // the previous in-memory-only setState silently
+                    // reverted to the global default.
+                    unawaited(DatabaseHelper.instance.setChatEphemeral(
+                      widget.recipientId, tempTtl, tempTrigger));
                     Navigator.pop(ctx);
                   },
                   child:       Text(S.save, style: TextStyle(color: Colors.white)),

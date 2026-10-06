@@ -42,7 +42,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _createDB,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -127,6 +127,15 @@ class DatabaseHelper {
             await db.execute('ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0');
           } catch (_) {}
         }
+        if (oldVersion < 8) {
+          try {
+            // Per-chat disappearing-timer override. A non-null
+            // ephemeral_trigger marks an explicit per-chat choice — even
+            // when ttl is NULL (chat opted out of the global default).
+            await db.execute('ALTER TABLE contacts ADD COLUMN ephemeral_ttl_ms INTEGER');
+            await db.execute('ALTER TABLE contacts ADD COLUMN ephemeral_trigger TEXT');
+          } catch (_) {}
+        }
       },
     );
   }
@@ -140,7 +149,9 @@ class DatabaseHelper {
         last_message TEXT,
         last_timestamp TEXT,
         unread_count INTEGER DEFAULT 0,
-        is_hidden INTEGER DEFAULT 0
+        is_hidden INTEGER DEFAULT 0,
+        ephemeral_ttl_ms INTEGER,
+        ephemeral_trigger TEXT
       )
     ''');
 
@@ -212,6 +223,41 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getContacts() async {
     final db = await instance.database;
     return await db.query('contacts');
+  }
+
+  /// Per-chat ephemeral-timer override. Returns null when the user has
+  /// never configured this chat (caller falls back to the global default).
+  /// A non-null `ephemeral_trigger` means an explicit choice — which may
+  /// still be "off" (ttl_ms NULL).
+  Future<Map<String, dynamic>?> getChatEphemeral(String peerId) async {
+    final db = await instance.database;
+    final rows = await db.query(
+      'contacts',
+      columns: ['ephemeral_ttl_ms', 'ephemeral_trigger'],
+      where: 'id = ?',
+      whereArgs: [peerId],
+      limit: 1,
+    );
+    if (rows.isEmpty || rows.first['ephemeral_trigger'] == null) return null;
+    return rows.first;
+  }
+
+  /// Persist the per-chat disappearing-timer choice. If the contact row
+  /// does not exist yet (fresh pair), create it so the setting survives.
+  Future<void> setChatEphemeral(
+      String peerId, int? ttlMs, String trigger) async {
+    final db = await instance.database;
+    await db.insert(
+      'contacts',
+      {'id': peerId, 'name': peerId, 'status': 'connected'},
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    await db.update(
+      'contacts',
+      {'ephemeral_ttl_ms': ttlMs, 'ephemeral_trigger': trigger},
+      where: 'id = ?',
+      whereArgs: [peerId],
+    );
   }
 
   Future<void> saveContact(String id, String name, String status) async {
