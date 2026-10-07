@@ -1,4 +1,4 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -9,8 +9,9 @@ import 'package:path_provider/path_provider.dart';
 
 import '../notifications/notification_service.dart';
 import '../storage/storage_service.dart';
+import 'websocket_service.dart';
 
-/// A newer release published on GitHub.
+/// A newer release published on the relay (closed channel).
 class WaslUpdate {
   final int versionCode;
   final String versionName;
@@ -22,53 +23,77 @@ class WaslUpdate {
   });
 }
 
-/// Self-update over GitHub Releases — no Play Store involved.
+/// Closed self-update channel — the release files live on the relay's
+/// private disk, NOT on any public link.
 ///
-/// Release workflow: create a GitHub release on the public repo with two
-/// assets — `version.json` (`{"version_code": N, "version_name": "x.y.z",
-/// "notes": "…"}`) and `wasl-release.apk`. The `releases/latest/download/…`
-/// URLs below always resolve to the newest release, so the app never needs
-/// a hardcoded version or API token.
+/// Flow:
+///   1. The app sends `update_check` over the ALREADY-AUTHENTICATED
+///      WebSocket — only signed-in identities ever reach this point.
+///   2. The relay replies `update_info` with the manifest and a one-time
+///      download token (single-use, expires in ~10 minutes).
+///   3. The APK is fetched from `GET /update/apk?token=…` — the bare URL
+///      404s for everyone, so no public link can ever exist or leak.
 ///
-/// Installing still requires the user's explicit approval ("install from
-/// this source") once per device — nothing is installed silently. Updates
-/// only apply when the signing key matches the installed build.
+/// Publishing a release is operator-only: PUT the files to
+/// `/admin/update/<name>` guarded by the ADMIN_TOKEN server secret.
 class UpdateService {
-  static const String _manifestUrl =
-      'https://github.com/moh71-code/wasl-relay/releases/latest/download/version.json';
-  static const String _apkUrl =
-      'https://github.com/moh71-code/wasl-relay/releases/latest/download/wasl-release.apk';
-
   static const Duration _checkInterval = Duration(hours: 24);
 
   /// Latest discovered update — the settings screen listens to this to show
   /// the "update available" badge even if the check ran at startup.
-  static final ValueNotifier<WaslUpdate?> pending = ValueNotifier<WaslUpdate?>(null);
+  static final ValueNotifier<WaslUpdate?> pending =
+      ValueNotifier<WaslUpdate?>(null);
 
-  /// Fetches the release manifest; returns a [WaslUpdate] only when the
-  /// published versionCode is strictly higher than the installed build.
-  static Future<WaslUpdate?> checkForUpdate() async {
+  /// Waits until the WS session is fully authenticated (post-`registered`),
+  /// since the relay drops every frame from unauthenticated sockets.
+  static Future<bool> _awaitConnected(Duration timeout) async {
+    final ws = WebSocketService();
+    if (ws.isConnected) return true;
     try {
-      final bust = DateTime.now().millisecondsSinceEpoch;
-      final res = await http
-          .get(Uri.parse('$_manifestUrl?cb=$bust'))
+      await ws.statusStream
+          .firstWhere((s) => s == 'connected')
+          .timeout(timeout);
+      return ws.isConnected;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// One WS round-trip: send `update_check`, await the `update_info` reply.
+  /// Returns the decoded payload or null on timeout/failure.
+  static Future<Map<String, dynamic>?> _requestUpdateInfo() async {
+    final ws = WebSocketService();
+    if (!await _awaitConnected(const Duration(seconds: 10))) return null;
+    try {
+      final reply = ws.messageStream
+          .firstWhere((m) => m['type'] == 'update_info')
           .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) return null;
+      ws.sendData({'type': 'update_check'});
+      return await reply;
+    } catch (_) {
+      return null;
+    }
+  }
 
-      final j = jsonDecode(res.body) as Map<String, dynamic>;
-      final remoteCode = (j['version_code'] as num?)?.toInt() ?? 0;
-
-      final info = await PackageInfo.fromPlatform();
-      final localCode = int.tryParse(info.buildNumber) ?? 0;
+  /// Fetches the manifest over the authenticated session; returns a
+  /// [WaslUpdate] only when the published versionCode is strictly higher.
+  static Future<WaslUpdate?> checkForUpdate() async {
+    final info = await _requestUpdateInfo();
+    if (info == null) return null;
+    final manifest = info['manifest'];
+    if (manifest is! Map) return null;
+    try {
+      final remoteCode = (manifest['version_code'] as num?)?.toInt() ?? 0;
+      final pkg = await PackageInfo.fromPlatform();
+      final localCode = int.tryParse(pkg.buildNumber) ?? 0;
       if (remoteCode <= localCode) {
         pending.value = null;
         return null;
       }
-
       final update = WaslUpdate(
         versionCode: remoteCode,
-        versionName: j['version_name']?.toString() ?? '',
-        notes: j['notes']?.toString() ?? '',
+        versionName: manifest['version_name']?.toString() ?? '',
+        notes: manifest['notes']?.toString() ?? '',
       );
       pending.value = update;
       return update;
@@ -95,13 +120,26 @@ class UpdateService {
     } catch (_) {}
   }
 
-  /// Streams the release APK to the temp directory, reporting progress as
-  /// 0.0–1.0. Any stale download from a previous attempt is overwritten.
+  /// Streams the release APK from the closed endpoint, reporting progress
+  /// as 0.0–1.0. A FRESH single-use token is minted per download, so a
+  /// token found at check time can never go stale before the user taps.
   static Future<File> downloadApk(void Function(double) onProgress) async {
-    final req = http.Request('GET', Uri.parse(_apkUrl));
-    final res = await http.Client()
-        .send(req)
-        .timeout(const Duration(seconds: 60));
+    final info = await _requestUpdateInfo();
+    final token = info?['token']?.toString() ?? '';
+    if (token.isEmpty) {
+      throw Exception('update token unavailable');
+    }
+
+    final cfg = await StorageService().getRelayConfig();
+    final scheme = (cfg['useWss'] as bool) ? 'https' : 'http';
+    final host = cfg['host'] as String;
+    final port = cfg['port'] as int;
+    final portPart = (port == 443 || port == 80) ? '' : ':$port';
+    final uri = Uri.parse('$scheme://$host$portPart/update/apk?token=$token');
+
+    final req = http.Request('GET', uri);
+    final res =
+        await http.Client().send(req).timeout(const Duration(seconds: 60));
     if (res.statusCode != 200) {
       throw Exception('APK download failed: HTTP ${res.statusCode}');
     }

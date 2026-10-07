@@ -6,6 +6,14 @@ services:
     startCommand: uvicorn relay_server:app --host 0.0.0.0 --port $PORT
     plan: starter
     healthCheckPath: /health
+    disk:
+      name: wasl-updates
+      mountPath: /data/updates
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Never commit the real value — sync:false makes Render prompt for it
+      # in the dashboard. Guards POST /admin/update/* uploads.
+      - key: ADMIN_TOKEN
+        sync: false

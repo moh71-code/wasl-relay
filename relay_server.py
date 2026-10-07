@@ -21,11 +21,12 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Dict, List, Tuple
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 
 try:
     from cryptography.exceptions import InvalidSignature
@@ -99,6 +100,18 @@ MAX_FRAME_BYTES = 64 * 1024 * 1024
 # Queued ciphertexts expire after 24 hours — recipients who never come online
 # must not accumulate data in RAM forever.
 QUEUE_TTL_SECONDS = 24 * 60 * 60
+
+# ── Closed update channel ────────────────────────────────────────────────────
+# Release files live on a persistent disk (UPDATE_DIR) and can ONLY be reached
+# by an authenticated WS client that requests a one-time download token — the
+# raw URL is never usable on its own, and tokens are single-use + expire.
+UPDATE_DIR = os.environ.get("UPDATE_DIR", "/data/updates")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+UPDATE_TOKEN_TTL = 600          # seconds
+UPDATE_MAX_BYTES = 200 * 1024 * 1024
+
+# token -> expiry unix ts (RAM only; a restart just forces a fresh check)
+_download_tokens: Dict[str, float] = {}
 
 
 def _uid(user_id: str) -> str:
@@ -316,6 +329,36 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                     fcm_tokens[current_user_id] = token
                 continue
 
+            # Closed update channel — the manifest rides the authenticated
+            # WS frame, and a single-use download token is minted for the APK.
+            # No public URL ever exists: a token expires in minutes and is
+            # consumed on first use, so sharing a link is impossible.
+            if msg_type == "update_check":
+                manifest = None
+                token = ""
+                mpath = os.path.join(UPDATE_DIR, "version.json")
+                apk_path = os.path.join(UPDATE_DIR, "wasl-release.apk")
+                try:
+                    if os.path.isfile(mpath) and os.path.isfile(apk_path):
+                        with open(mpath, encoding="utf-8") as mf:
+                            manifest = json.loads(mf.read())
+                        # Lazy sweep of expired tokens while we're here.
+                        now = time.time()
+                        for t, exp in list(_download_tokens.items()):
+                            if exp < now:
+                                _download_tokens.pop(t, None)
+                        token = secrets.token_urlsafe(32)
+                        _download_tokens[token] = now + UPDATE_TOKEN_TTL
+                except Exception:
+                    manifest = None
+                    token = ""
+                await websocket.send_text(json.dumps({
+                    "type": "update_info",
+                    "manifest": manifest,
+                    "token": token,
+                }))
+                continue
+
             # Delete for everyone — also purge from offline queue
             if msg_type == "delete_message":
                 recipient_id = data.get("recipient_id")
@@ -379,6 +422,54 @@ async def health():
 @app.get("/")
 async def root():
     return JSONResponse({"wasl": "relay", "status": "running"})
+
+
+@app.get("/update/apk")
+async def update_apk(token: str = ""):
+    """Closed-channel APK download.
+
+    Requires a single-use token minted over an authenticated WS session via
+    `update_check` — the URL alone is dead: unknown/expired/consumed tokens
+    get a 404, so the app file can never be fetched by link-sharing.
+    """
+    exp = _download_tokens.pop(token, None)   # single-use: consume it
+    if exp is None or exp < time.time():
+        raise HTTPException(status_code=404)
+    path = os.path.join(UPDATE_DIR, "wasl-release.apk")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404)
+    logger.info("Serving update APK to an authenticated session token")
+    return FileResponse(
+        path, media_type="application/vnd.android.package-archive")
+
+
+@app.put("/admin/update/{name}")
+async def admin_update_upload(name: str, request: Request):
+    """Operator-only upload of release files (version.json / APK).
+
+    Guarded by the ADMIN_TOKEN env secret — returns 404 (not 403) so the
+    endpoint's existence isn't advertised to anyone probing the service.
+    """
+    if not ADMIN_TOKEN or request.headers.get("x-admin-token") != ADMIN_TOKEN:
+        raise HTTPException(status_code=404)
+    if name not in ("version.json", "wasl-release.apk"):
+        raise HTTPException(status_code=404)
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    dest = os.path.join(UPDATE_DIR, name)
+    size = 0
+    with open(dest, "wb") as f:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > UPDATE_MAX_BYTES:
+                f.close()
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                raise HTTPException(status_code=413)
+            f.write(chunk)
+    logger.info("Update asset uploaded: %s (%d bytes)", name, size)
+    return JSONResponse({"ok": True, "bytes": size})
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
