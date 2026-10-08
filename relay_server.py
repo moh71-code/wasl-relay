@@ -454,20 +454,28 @@ async def admin_update_upload(name: str, request: Request):
         raise HTTPException(status_code=404)
     if name not in ("version.json", "wasl-release.apk"):
         raise HTTPException(status_code=404)
-    os.makedirs(UPDATE_DIR, exist_ok=True)
-    dest = os.path.join(UPDATE_DIR, name)
-    size = 0
-    with open(dest, "wb") as f:
-        async for chunk in request.stream():
-            size += len(chunk)
-            if size > UPDATE_MAX_BYTES:
-                f.close()
-                try:
-                    os.remove(dest)
-                except OSError:
-                    pass
-                raise HTTPException(status_code=413)
-            f.write(chunk)
+    try:
+        os.makedirs(UPDATE_DIR, exist_ok=True)
+        dest = os.path.join(UPDATE_DIR, name)
+        size = 0
+        with open(dest, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > UPDATE_MAX_BYTES:
+                    f.close()
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+                    raise HTTPException(status_code=413)
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Admin-only endpoint — echoing the failure reason is safe here and
+        # makes ops debugging (e.g. unmounted disk) possible without logs.
+        logger.exception("Update upload failed for %s", name)
+        raise HTTPException(status_code=500, detail=f"upload_failed: {e}")
     logger.info("Update asset uploaded: %s (%d bytes)", name, size)
     return JSONResponse({"ok": True, "bytes": size})
 
