@@ -181,7 +181,7 @@ class FileTransferService {
       return;
     }
 
-    final fileId = data['file_id'] as String;
+    final fileId = WaslMedia.safeFileId(data['file_id'] as String);
     final idx = data['chunk_index'] as int;
     final total = data['total_chunks'] as int;
     final encoded = data['encrypted_payload'] as String;
@@ -284,7 +284,9 @@ class FileTransferService {
   /// us verbatim, persist the payload directly instead of dropping it.
   Future<void> _saveOfflineFile(Map<String, dynamic> data) async {
     try {
-      final fileId = data['file_id'] as String?;
+      final fileId = data['file_id'] == null
+          ? null
+          : WaslMedia.safeFileId(data['file_id'] as String);
       final sender = (data['sender_id'] as String?)?.trim().toUpperCase();
       final ciphertextB64 = data['ciphertext_b64'] as String?;
       if (fileId == null || sender == null || ciphertextB64 == null) return;

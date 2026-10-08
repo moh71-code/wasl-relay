@@ -43,6 +43,14 @@ class WaslMedia {
     return 'text';
   }
 
+  /// Sanitizes a REMOTE-supplied file_id before it is spliced into a disk
+  /// path. The id travels over the wire, so a hostile peer could otherwise
+  /// smuggle `..` or `/` and write outside the media directory.
+  static String safeFileId(String raw) {
+    final id = raw.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    return id.isEmpty ? 'file' : id;
+  }
+
   /// Sanitizes a sender-supplied filename to a safe basename for on-disk
   /// storage — strips path separators and traversal so a peer can never
   /// escape the app documents directory. The original name is still kept

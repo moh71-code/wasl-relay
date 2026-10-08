@@ -574,7 +574,9 @@ class GroupService {
       final senderId = (data['sender_id'] as String?)?.trim().toUpperCase();
       final recipientId =
           (data['recipient_id'] as String?)?.trim().toUpperCase();
-      final fileId = data['file_id'] as String?;
+      final fileId = data['file_id'] == null
+          ? null
+          : WaslMedia.safeFileId(data['file_id'] as String);
       if (groupId == null || senderId == null || recipientId != myIdNorm ||
           fileId == null) {
         return true;
@@ -611,7 +613,9 @@ class GroupService {
     if (type == 'group_file_chunk') {
       final recipientId =
           (data['recipient_id'] as String?)?.trim().toUpperCase();
-      final fileId = data['file_id'] as String?;
+      final fileId = data['file_id'] == null
+          ? null
+          : WaslMedia.safeFileId(data['file_id'] as String);
       final groupId = (data['group_id'] as String?)?.trim().toUpperCase();
       final senderId = (data['sender_id'] as String?)?.trim().toUpperCase();
       final idx = data['chunk_index'] as int?;
@@ -681,7 +685,9 @@ class GroupService {
     if (type == 'offline_group_file') {
       final recipientId =
           (data['recipient_id'] as String?)?.trim().toUpperCase();
-      final fileId = data['file_id'] as String?;
+      final fileId = data['file_id'] == null
+          ? null
+          : WaslMedia.safeFileId(data['file_id'] as String);
       final groupId = (data['group_id'] as String?)?.trim().toUpperCase();
       final senderId = (data['sender_id'] as String?)?.trim().toUpperCase();
       final cipherB64 = data['ciphertext_b64'] as String?;
