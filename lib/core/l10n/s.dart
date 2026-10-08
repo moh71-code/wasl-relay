@@ -33,6 +33,7 @@ class S {
   static String get group => isAr ? 'مجموعة' : 'Group';
   static String get admin => isAr ? 'مشرف' : 'Admin';
   static String get image => isAr ? 'صورة' : 'Image';
+  static String get today => isAr ? 'اليوم' : 'Today';
   static String get yesterday => isAr ? 'أمس' : 'Yesterday';
   static List<String> get weekdays => isAr
       ? const ['الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
@@ -76,7 +77,7 @@ class S {
   static String messageSendFailed(Object e) =>
       isAr ? 'تعذر إرسال الرسالة: $e' : 'Could not send message: $e';
   static String get fileTooLarge =>
-      isAr ? 'حجم الملف أكبر من 25 ميجابايت' : 'File is larger than 25 MB';
+      isAr ? 'حجم الملف أكبر من 100 ميجابايت' : 'File is larger than 100 MB';
   static String fileSendFailed(Object e) =>
       isAr ? 'تعذر إرسال الملف: $e' : 'Could not send file: $e';
   static String get noMicPermission =>

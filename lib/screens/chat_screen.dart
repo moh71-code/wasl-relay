@@ -883,7 +883,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final file = result.single;
     final bytes = await file.readAsBytes();
 
-    const maxFileBytes = 25 * 1024 * 1024;
+    const maxFileBytes = 100 * 1024 * 1024;
     if (bytes.length > maxFileBytes) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1532,13 +1532,50 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String _formatMessageTime(dynamic timestamp) {
-    final ms = timestamp is int
-        ? timestamp
-        : int.tryParse(timestamp?.toString() ?? '') ?? 0;
+    final ms = _tsMs(timestamp);
     if (ms == 0) return '';
     final date = DateTime.fromMillisecondsSinceEpoch(ms);
     return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
   }
+
+  int _tsMs(dynamic ts) =>
+      ts is int ? ts : int.tryParse(ts?.toString() ?? '') ?? 0;
+
+  bool _isSameDay(int aMs, int bMs) {
+    final a = DateTime.fromMillisecondsSinceEpoch(aMs);
+    final b = DateTime.fromMillisecondsSinceEpoch(bMs);
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  /// WhatsApp-style day pill: "اليوم" / "أمس" / numeric date.
+  String _dayLabel(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    final now = DateTime.now();
+    final diff = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(d.year, d.month, d.day))
+        .inDays;
+    if (diff <= 0) return S.today;
+    if (diff == 1) return S.yesterday;
+    return '${d.day}/${d.month}/${d.year}';
+  }
+
+  Widget _dayHeader(String label, bool isDark) => Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          decoration: BoxDecoration(
+            color: isDark ? WaslColors.darkMuted : WaslColors.muted,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: WaslColors.mutedFg(context),
+            ),
+          ),
+        ),
+      );
 
   /// True only while a media transfer is genuinely in flight. Plain text rows
   /// store transfer_progress = 0.0, so checking progress alone would paint a
@@ -1835,6 +1872,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 // instantly, with no scroll animation.
                 final realIndex = _messages.length - 1 - index;
                 final msg = _messages[realIndex];
+                // Day pill above the first message of each new day —
+                // realIndex == 0 is the oldest message of the chat.
+                final showDayHeader = realIndex == 0 ||
+                    !_isSameDay(
+                        _tsMs(_messages[realIndex - 1]['timestamp']),
+                        _tsMs(msg['timestamp']));
                 final isMe = msg['isMe'] == true;
                 final isDeleted = (msg['is_deleted_for_everyone'] ?? 0) == 1;
                 final msgUuid = msg['message_uuid']?.toString();
@@ -1843,7 +1886,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 final reaction = msg['reaction']?.toString();
                 final replyText = msg['reply_to_text']?.toString();
 
-                return MessageIn(
+                return Column(
+                  children: [
+                    if (showDayHeader)
+                      _dayHeader(
+                          _dayLabel(_tsMs(msg['timestamp'])), isDark),
+                    MessageIn(
                   child: Container(
                     color: isSelected
                         ? WaslColors.primary.withValues(alpha: 0.12)
@@ -2017,6 +2065,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   ),
+                    ),
+                  ],
                 );
               },
               ),

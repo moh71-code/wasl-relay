@@ -1,7 +1,7 @@
 name: wasl_app
 description: "WASL - Secure & Anonymous E2EE Instant Messenger"
 publish_to: 'none'
-version: 1.0.1+2
+version: 1.0.3+4
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

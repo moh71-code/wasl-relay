@@ -89,9 +89,10 @@ _SILENT_TYPES = {
 
 MAX_QUEUE = 300
 
-# Per-recipient queued bytes cap — file frames can be large (offline_file
-# embeds a whole file) so a count cap alone cannot bound RAM growth.
-MAX_QUEUE_BYTES = 64 * 1024 * 1024
+# Per-recipient queued bytes cap — file frames are 64KB chunks, but a 100MB
+# file fans out to ~137MB of base64 payloads; the budget must hold one full
+# file for offline recipients or tail chunks would be dropped mid-transfer.
+MAX_QUEUE_BYTES = 160 * 1024 * 1024
 
 # Hard frame size cap — matches the per-recipient queue byte budget, so an
 # offline_file envelope (~47MB raw → ~64MB base64) is the largest legit frame.

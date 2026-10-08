@@ -170,7 +170,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (result.isEmpty) return;
     final file = result.single;
     final bytes = await file.readAsBytes();
-    if (bytes.length > 25 * 1024 * 1024) {
+    if (bytes.length > 100 * 1024 * 1024) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text(S.fileTooLarge)),
@@ -313,11 +313,50 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   String _formatTime(dynamic ts) {
-    final ms = ts is int ? ts : int.tryParse(ts?.toString() ?? '') ?? 0;
+    final ms = _tsMs(ts);
     if (ms == 0) return '';
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     return '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   }
+
+  int _tsMs(dynamic ts) =>
+      ts is int ? ts : int.tryParse(ts?.toString() ?? '') ?? 0;
+
+  bool _isSameDay(int aMs, int bMs) {
+    final a = DateTime.fromMillisecondsSinceEpoch(aMs);
+    final b = DateTime.fromMillisecondsSinceEpoch(bMs);
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  /// WhatsApp-style day pill: "اليوم" / "أمس" / numeric date.
+  String _dayLabel(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    final now = DateTime.now();
+    final diff = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(d.year, d.month, d.day))
+        .inDays;
+    if (diff <= 0) return S.today;
+    if (diff == 1) return S.yesterday;
+    return '${d.day}/${d.month}/${d.year}';
+  }
+
+  Widget _dayHeader(String label, bool isDark) => Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          decoration: BoxDecoration(
+            color: isDark ? WaslColors.darkMuted : WaslColors.muted,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: WaslColors.mutedFg(context),
+            ),
+          ),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -426,9 +465,27 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           reverse: true,
                           padding: const EdgeInsets.all(16),
                           itemCount: _messages.length,
-                          itemBuilder: (context, i) =>
-                              _buildBubble(
-                                  _messages[_messages.length - 1 - i], isDark),
+                          itemBuilder: (context, i) {
+                            // reverse:true → visual 0 is the newest message;
+                            // the day pill sits above the first message of
+                            // each new day (realIndex 0 = oldest).
+                            final realIndex = _messages.length - 1 - i;
+                            final m = _messages[realIndex];
+                            final showDayHeader = realIndex == 0 ||
+                                !_isSameDay(
+                                    _tsMs(_messages[realIndex - 1]
+                                        ['timestamp']),
+                                    _tsMs(m['timestamp']));
+                            return Column(
+                              children: [
+                                if (showDayHeader)
+                                  _dayHeader(
+                                      _dayLabel(_tsMs(m['timestamp'])),
+                                      isDark),
+                                _buildBubble(m, isDark),
+                              ],
+                            );
+                          },
                         ),
                       ),
           ),
