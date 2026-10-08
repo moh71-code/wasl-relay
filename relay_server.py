@@ -106,6 +106,18 @@ QUEUE_TTL_SECONDS = 24 * 60 * 60
 # by an authenticated WS client that requests a one-time download token — the
 # raw URL is never usable on its own, and tokens are single-use + expire.
 UPDATE_DIR = os.environ.get("UPDATE_DIR", "/data/updates")
+try:
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+except OSError:
+    # Disk not mounted (or fs not writable) — fall back to an app-local dir.
+    # It is EPHEMERAL (lost on redeploy) but keeps the channel working until
+    # a persistent disk is attached in the Render dashboard.
+    UPDATE_DIR = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "wasl_updates")
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    logger.warning(
+        "Persistent update dir unavailable — using ephemeral %s", UPDATE_DIR)
+
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 UPDATE_TOKEN_TTL = 600          # seconds
 UPDATE_MAX_BYTES = 200 * 1024 * 1024
