@@ -342,6 +342,19 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                     fcm_tokens[current_user_id] = token
                 continue
 
+            # Authenticated presence query — only ever replies with online/offline.
+            if msg_type == "presence_query":
+                target = str(data.get("recipient_id", "")).strip().upper()
+                request_id = data.get("request_id", "")
+                if target:
+                    await websocket.send_text(json.dumps({
+                        "type": "presence_info",
+                        "request_id": request_id,
+                        "recipient_id": target,
+                        "online": target in active_clients,
+                    }))
+                continue
+
             # Closed update channel — the manifest rides the authenticated
             # WS frame, and a single-use download token is minted for the APK.
             # No public URL ever exists: a token expires in minutes and is

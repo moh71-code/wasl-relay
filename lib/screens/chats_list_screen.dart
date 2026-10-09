@@ -40,6 +40,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   StreamSubscription? _statusSub;
   StreamSubscription? _msgSub;
   StreamSubscription? _pairSubscription;
+  Timer? _presenceTimer;
+
+  // Authenticated relay presence: user_id (UPPERCASE) -> online.
+  final Map<String, bool> _peerOnline = {};
 
   @override
   void initState() {
@@ -47,6 +51,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     _connectionStatus = _wsService.connectionState;
     _statusSub = _wsService.statusStream.listen((status) {
       if (mounted) setState(() => _connectionStatus = status);
+      if (status == 'connected') {
+        _queryAllContactsPresence();
+      } else {
+        _presenceTimer?.cancel();
+        _presenceTimer = null;
+      }
     });
     _initNetworkAndLoadContacts();
     _listenForPairingRequests();
@@ -57,6 +67,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     _statusSub?.cancel();
     _msgSub?.cancel();
     _pairSubscription?.cancel();
+    _presenceTimer?.cancel();
     super.dispose();
   }
 
@@ -223,6 +234,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Future<void> _initNetworkAndLoadContacts() async {
     _msgSub = _wsService.messageStream.listen((data) async {
       final t = data['type'];
+      if (t == 'presence_info') {
+        final rid = data['recipient_id']?.toString().trim().toUpperCase();
+        if (rid != null) {
+          setState(() => _peerOnline[rid] = data['online'] == true);
+        }
+        return;
+      }
       if (t == 'message_received' ||
           t == 'new_message' ||
           t == 'chat_message' ||
@@ -344,6 +362,23 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       _groups = groups;
       _isLoading = false;
     });
+    _queryAllContactsPresence();
+  }
+
+  void _queryAllContactsPresence() {
+    if (!WebSocketService().isConnected) return;
+    _presenceTimer?.cancel();
+    _presenceTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _queryAllContactsPresence();
+    });
+    for (final c in _contacts) {
+      final rid = _getRecipientId(c).trim().toUpperCase();
+      if (rid.isEmpty) continue;
+      WebSocketService().sendPresenceQuery(
+        recipientId: rid,
+        requestId: DateTime.now().millisecondsSinceEpoch.toString(),
+      );
+    }
   }
 
   /// Unified, time-sorted list of 1:1 chats and groups.
@@ -834,7 +869,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         children: [
           WaslAvatar(
               color: avatarColor, initials: initial, size: 52),
-          if (_connectionStatus == 'connected')
+          if (_peerOnline[recipientId.trim().toUpperCase()] == true)
             Positioned(
               bottom: 0,
               left: 0,

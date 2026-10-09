@@ -50,6 +50,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final Uuid _uuid = const Uuid();
 
   String _connectionStatus = 'connected';
+  bool _peerOnline = false;
   bool _sendReadReceipts = true;
   String _peerDisplayName = '';
   bool _isRecording = false;
@@ -60,6 +61,9 @@ class _ChatScreenState extends State<ChatScreen> {
   DateTime _lastTypingSentAt =
       DateTime.fromMillisecondsSinceEpoch(0);
   bool _typingSent = false;
+
+  // Real peer presence — polled from the relay, never inferred locally.
+  Timer? _presenceTimer;
 
   // Reply / edit / multi-select state
   Map<String, dynamic>? _replyTo;
@@ -94,7 +98,18 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _statusSubscription = WebSocketService().statusStream.listen((status) {
       if (mounted) setState(() => _connectionStatus = status);
+      if (status == 'connected') {
+        _queryPeerPresence();
+      } else {
+        _presenceTimer?.cancel();
+        _presenceTimer = null;
+      }
     });
+
+    // If already authenticated, ask the relay once immediately.
+    if (_connectionStatus == 'connected') {
+      _queryPeerPresence();
+    }
 
     await _loadLocalHistory();
 
@@ -390,6 +405,14 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
 
+      // 5. Authenticated relay presence result for this peer
+      else if (type == 'presence_info' &&
+          data['recipient_id']?.toString().trim().toUpperCase() ==
+              widget.recipientId.trim().toUpperCase()) {
+        final online = data['online'] == true;
+        setState(() => _peerOnline = online);
+      }
+
       // 5. Typing indicator from peer
       else if (type == 'typing' && data['sender_id'] == widget.recipientId) {
         final isTyping = data['is_typing'] == true;
@@ -524,10 +547,25 @@ class _ChatScreenState extends State<ChatScreen> {
     _ftProgressSub?.cancel();
     _statusSubscription?.cancel();
     _peerTypingTimer?.cancel();
+    _presenceTimer?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     _audioPlayer.dispose();
     super.dispose();
+  }
+
+  void _queryPeerPresence() {
+    if (!WebSocketService().isConnected) return;
+    WebSocketService().sendPresenceQuery(
+      recipientId: widget.recipientId,
+      requestId: DateTime.now().millisecondsSinceEpoch.toString(),
+    );
+    _presenceTimer?.cancel();
+    _presenceTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (mounted && WebSocketService().isConnected) {
+        _queryPeerPresence();
+      }
+    });
   }
 
   /// Typing indicator: tiny unencrypted control frame (metadata only — no
@@ -1714,7 +1752,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isOnline = _connectionStatus == 'connected';
+    final localConnected = _connectionStatus == 'connected';
+    final peerOnline = _peerOnline;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final peerName = _peerDisplayName.isNotEmpty
         ? _peerDisplayName
@@ -1775,7 +1814,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: Text(
                           _peerTyping
                               ? S.typing
-                              : (isOnline
+                              : (peerOnline
                                   ? S.onlineE2e
                                   : S.e2e),
                           overflow: TextOverflow.ellipsis,
@@ -1833,7 +1872,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
-          if (!isOnline)
+          if (!localConnected)
             Container(
               width: double.infinity,
               color: Colors.amber[800],

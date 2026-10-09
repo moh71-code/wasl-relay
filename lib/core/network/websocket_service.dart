@@ -280,6 +280,18 @@ class WebSocketService {
     });
   }
 
+  /// Query the relay for the authenticated presence of a user.
+  void sendPresenceQuery({
+    required String recipientId,
+    String? requestId,
+  }) {
+    sendData({
+      'type': 'presence_query',
+      'recipient_id': recipientId,
+      'request_id': requestId ?? DateTime.now().millisecondsSinceEpoch.toString(),
+    });
+  }
+
   /// Send read acknowledgment to sender
   void sendReadAck({
     required List<String> messageUuids,
