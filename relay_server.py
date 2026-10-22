@@ -208,10 +208,16 @@ def _maybe_wake(recipient_id: str, msg_type: str) -> None:
         return
     if recipient_id in _wake_sent:
         return
+    _wake_sent.add(recipient_id)
     token = fcm_tokens.get(recipient_id)
     if token:
-        _wake_sent.add(recipient_id)
         asyncio.create_task(_send_wake_push(recipient_id, token))
+    else:
+        # Explicit: the device never pushed a token (or it was dropped as
+        # stale) — without this line a tokenless recipient looks identical
+        # to a woken one in the logs and is undebuggable.
+        logger.info("No FCM token for %s — wake push unavailable",
+                    _uid(recipient_id))
 
 
 async def _deliver(recipient_id: str, payload: str, msg_type: str = "msg") -> bool:

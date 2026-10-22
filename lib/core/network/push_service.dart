@@ -55,8 +55,20 @@ class PushService {
       FirebaseMessaging.onBackgroundMessage(_backgroundHandler);
 
       final messaging = FirebaseMessaging.instance;
-      await messaging.requestPermission();
-      _token = await messaging.getToken();
+      // Permission is only needed to DISPLAY the local notification — the
+      // FCM data push itself reaches the app regardless. A failure here
+      // (denied prompt, OEM quirk, no foreground Activity) must never
+      // block token registration or the device stays wake-deaf forever.
+      try {
+        await messaging.requestPermission();
+      } catch (e) {
+        debugPrint('PushService: notification permission request failed: $e');
+      }
+      try {
+        _token = await messaging.getToken();
+      } catch (e) {
+        debugPrint('PushService: getToken failed (wake pushes off): $e');
+      }
       messaging.onTokenRefresh.listen((t) {
         _token = t;
         _sendTokenToRelay();
