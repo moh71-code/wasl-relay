@@ -47,8 +47,14 @@ class NotificationService {
             importance: Importance.high,
           ),
         );
-        // Android 13+ runtime permission
-        await androidImpl.requestNotificationsPermission();
+        // Android 13+ runtime permission — isolated so a failure inside a
+        // background isolate (no foreground Activity) can't poison init
+        // and silence every later notify call in that isolate.
+        try {
+          await androidImpl.requestNotificationsPermission();
+        } catch (e) {
+          debugPrint('Notification permission request failed: $e');
+        }
       }
       _initialized = true;
     } catch (e) {
