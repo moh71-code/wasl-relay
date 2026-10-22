@@ -80,6 +80,13 @@ offline_queue: Dict[str, List[Tuple[float, str]]] = collections.defaultdict(list
 # user_id -> FCM device token (RAM only; clients re-push it on every connect)
 fcm_tokens: Dict[str, str] = {}
 
+# user_ids already woken during their current offline stretch. Silent frames
+# (e.g. "typing") also occupy the offline queue, so a queue-position check
+# can't decide the wake: a typing frame buffered first would make every real
+# message after it skip the wake. Track the wake instead — fire once on the
+# first NON-SILENT frame buffered, reset when the queue flushes/expires.
+_wake_sent: set = set()
+
 # Frame types that must NOT wake the recipient's device — acks, typing
 # indicators and control frames are silently queued/delivered only.
 _SILENT_TYPES = {
@@ -136,6 +143,7 @@ def _prune_queue(user_id: str) -> None:
     """Drop expired entries for a user (lazy cleanup on access)."""
     q = offline_queue.get(user_id)
     if not q:
+        _wake_sent.discard(user_id)
         return
     cutoff = time.time() - QUEUE_TTL_SECONDS
     fresh = [entry for entry in q if entry[0] >= cutoff]
@@ -143,6 +151,7 @@ def _prune_queue(user_id: str) -> None:
         offline_queue[user_id] = fresh
     else:
         offline_queue.pop(user_id, None)
+        _wake_sent.discard(user_id)
 
 
 def _verify_register(user_id: str, public_key_b64: str, nonce: str,
@@ -192,13 +201,16 @@ async def _send_wake_push(recipient_id: str, token: str) -> None:
 
 
 def _maybe_wake(recipient_id: str, msg_type: str) -> None:
-    """Fire-and-forget wake push when buffering a real message for an
-    offline user. Throttled: only fires on the FIRST item entering an
-    empty queue — the rest ride the same wake (queue flushes whole)."""
+    """Fire-and-forget wake push for an offline user — once per offline
+    stretch, on the FIRST non-silent frame buffered. Silent frames like
+    typing never wake, and must not consume the wake slot either."""
     if not _FCM_READY or msg_type in _SILENT_TYPES:
+        return
+    if recipient_id in _wake_sent:
         return
     token = fcm_tokens.get(recipient_id)
     if token:
+        _wake_sent.add(recipient_id)
         asyncio.create_task(_send_wake_push(recipient_id, token))
 
 
@@ -217,12 +229,12 @@ async def _deliver(recipient_id: str, payload: str, msg_type: str = "msg") -> bo
     q = offline_queue[recipient_id]
     queued_bytes = sum(len(entry[1]) for entry in q)
     if len(q) < MAX_QUEUE and queued_bytes + len(payload) <= MAX_QUEUE_BYTES:
-        was_empty = not q
         q.append((time.time(), payload))
         logger.info("Buffered [%s] for offline %s (queue=%d)",
                     msg_type, _uid(recipient_id), len(q))
-        if was_empty:
-            _maybe_wake(recipient_id, msg_type)
+        # Wake fires only on the first NON-SILENT frame — silent frames
+        # (typing etc.) must not consume the one-shot wake slot.
+        _maybe_wake(recipient_id, msg_type)
     else:
         logger.warning("Queue full for %s, dropping [%s]",
                        _uid(recipient_id), msg_type)
@@ -233,6 +245,7 @@ async def _flush_queue(user_id: str, ws: WebSocket):
     """Flush buffered messages when an AUTHENTICATED user comes online."""
     _prune_queue(user_id)
     pending = offline_queue.pop(user_id, [])
+    _wake_sent.discard(user_id)
     if pending:
         logger.info("Flushing %d queued message(s) to %s",
                     len(pending), _uid(user_id))
@@ -395,6 +408,9 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                         entry for entry in offline_queue[recipient_id]
                         if msg_uuid not in entry[1]
                     ]
+                    if not offline_queue[recipient_id]:
+                        offline_queue.pop(recipient_id, None)
+                        _wake_sent.discard(recipient_id)
                 if recipient_id:
                     await _deliver(recipient_id, raw, "delete_message")
                 continue
