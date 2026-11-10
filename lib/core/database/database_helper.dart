@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:uuid/uuid.dart';
-import '../media/media_kind.dart';
 import '../network/websocket_service.dart';
 
 class DatabaseHelper {
@@ -780,9 +779,18 @@ class DatabaseHelper {
           final fileId = data['file_id'] as String;
           final sender = data['sender_id'] as String;
           final recipient = data['recipient_id'] as String;
-          final origName = data['original_name'] as String? ?? '';
-          final mediaType =
-              (data['media_type'] as String?) ?? WaslMedia.typeFromName(origName);
+          // Sealed name/type (nct/nn/nm) on new envelopes; legacy rows may
+          // still carry cleartext original_name/media_type — pass through
+          // whichever exists.
+          final sealed = <String, dynamic>{
+            if (data['nct'] != null) 'nct': data['nct'],
+            if (data['nn'] != null) 'nn': data['nn'],
+            if (data['nm'] != null) 'nm': data['nm'],
+            if (data['nct'] == null) ...{
+              'original_name': data['original_name'] as String? ?? '',
+              'media_type': data['media_type'] as String? ?? 'file',
+            },
+          };
           final chunkSize = (data['chunk_size'] as int?) ?? 64 * 1024;
           final totalChunks = (ciphertext.length / chunkSize).ceil();
 
@@ -791,8 +799,7 @@ class DatabaseHelper {
             'file_id': fileId,
             'sender_id': sender,
             'recipient_id': recipient,
-            'original_name': origName,
-            'media_type': mediaType,
+            ...sealed,
             'total_chunks': totalChunks,
             'expires_at': data['expires_at'],
           });
@@ -811,10 +818,68 @@ class DatabaseHelper {
               'encrypted_payload': base64.encode(chunk),
               'nonce': nonce,
               'mac': mac,
-              'original_name': origName,
-              'media_type': mediaType,
+              ...sealed,
             };
             WebSocketService().sendData(payloadChunk);
+            await Future.delayed(const Duration(milliseconds: 15));
+          }
+          await db.delete('outbox', where: 'id = ?', whereArgs: [id]);
+        } else if (data['type'] == 'offline_group_file') {
+          // Group offline envelopes store the WHOLE ciphertext in one
+          // payload; sending it verbatim as a single WS frame can exceed
+          // the relay's MAX_FRAME_BYTES and be dropped silently. Re-chunk
+          // exactly like the 1:1 path: offer frame, then 64KB chunks.
+          final ciphertext = base64.decode(data['ciphertext_b64'] as String);
+          final nonce = data['nonce'] as String;
+          final mac = data['mac'] as String;
+          final fileId = data['file_id'] as String;
+          final groupId = data['group_id'] as String;
+          final sender = data['sender_id'] as String;
+          final recipient = data['recipient_id'] as String;
+          final senderName = data['sender_name'] as String?;
+          final sealed = <String, dynamic>{
+            if (data['nct'] != null) 'nct': data['nct'],
+            if (data['nn'] != null) 'nn': data['nn'],
+            if (data['nm'] != null) 'nm': data['nm'],
+            if (data['nct'] == null) ...{
+              'original_name': data['original_name'] as String? ?? '',
+              'media_type': data['media_type'] as String? ?? 'file',
+            },
+          };
+          final chunkSize = (data['chunk_size'] as int?) ?? 64 * 1024;
+          final totalChunks = (ciphertext.length / chunkSize).ceil();
+
+          WebSocketService().sendData({
+            'type': 'group_file_offer',
+            'group_id': groupId,
+            'file_id': fileId,
+            'sender_id': sender,
+            'recipient_id': recipient,
+            'sender_name': senderName,
+            ...sealed,
+            'total_chunks': totalChunks,
+            'expires_at': data['expires_at'],
+          });
+
+          for (var i = 0; i < totalChunks; i++) {
+            final start = i * chunkSize;
+            final end = ((i + 1) * chunkSize).clamp(0, ciphertext.length);
+            WebSocketService().sendData({
+              'type': 'group_file_chunk',
+              'group_id': groupId,
+              'file_id': fileId,
+              'sender_id': sender,
+              'recipient_id': recipient,
+              'sender_name': senderName,
+              'chunk_index': i,
+              'total_chunks': totalChunks,
+              'encrypted_payload':
+                  base64.encode(ciphertext.sublist(start, end)),
+              'nonce': nonce,
+              'mac': mac,
+              ...sealed,
+              'expires_at': data['expires_at'],
+            });
             await Future.delayed(const Duration(milliseconds: 15));
           }
           await db.delete('outbox', where: 'id = ?', whereArgs: [id]);
@@ -891,6 +956,18 @@ class DatabaseHelper {
       {'transfer_status': status, 'transfer_progress': progress},
       where: 'file_path = ?',
       whereArgs: [filePath],
+    );
+  }
+
+  /// Fail a stalled incoming transfer by its message_uuid — the placeholder
+  /// row has no file_path yet, so updateMessageTransfer cannot reach it.
+  Future<void> markTransferFailedByUuid(String uuid) async {
+    final db = await instance.database;
+    await db.update(
+      'messages',
+      {'transfer_status': 'failed'},
+      where: 'message_uuid = ? AND transfer_status = ?',
+      whereArgs: [uuid, 'receiving'],
     );
   }
 

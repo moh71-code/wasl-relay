@@ -61,7 +61,7 @@ class MessageIngestionService {
     // Group protocol frames (invites, group messages, member events)
     if (type == 'group_invite' || type == 'group_message' || type == 'group_leave' ||
         type == 'group_file_offer' || type == 'group_file_chunk' ||
-        type == 'offline_group_file') {
+        type == 'offline_group_file' || type == 'group_file_resend_request') {
       await GroupService().handleFrame(data, myId);
       if (type == 'group_message' || type == 'group_file_chunk' ||
           type == 'offline_group_file') {

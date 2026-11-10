@@ -77,8 +77,10 @@ user_bindings: Dict[str, str] = {}
 # Ephemeral offline queue: user_id -> [(unix_ts, raw JSON string)] (RAM only)
 offline_queue: Dict[str, List[Tuple[float, str]]] = collections.defaultdict(list)
 
-# user_id -> FCM device token (RAM only; clients re-push it on every connect)
-fcm_tokens: Dict[str, str] = {}
+# user_id -> set of FCM device tokens (RAM only; clients re-push on every
+# connect). A SET per user so a second device on the same identity still
+# gets woken — the first token no longer evicts the second.
+fcm_tokens: Dict[str, set] = collections.defaultdict(set)
 
 # user_ids already woken during their current offline stretch. Silent frames
 # (e.g. "typing") also occupy the offline queue, so a queue-position check
@@ -94,7 +96,12 @@ _SILENT_TYPES = {
     "delete_message", "fcm_token",
 }
 
-MAX_QUEUE = 300
+# Per-recipient queued FRAME cap. File transfers fan out to one queue item
+# per 64KB chunk, so this must comfortably exceed one full file's chunk
+# count (~1600 chunks for 100MB ciphertext) — otherwise the item cap kills
+# mid-transfer before the byte budget below is ever reached. The byte cap
+# is the real limiter; this number only guards against frame spam.
+MAX_QUEUE = 3000
 
 # Per-recipient queued bytes cap — file frames are 64KB chunks, but a 100MB
 # file fans out to ~137MB of base64 payloads; the budget must hold one full
@@ -171,33 +178,35 @@ def _verify_register(user_id: str, public_key_b64: str, nonce: str,
         return False
 
 
-async def _send_wake_push(recipient_id: str, token: str) -> None:
+async def _send_wake_push(recipient_id: str, tokens: set) -> None:
     """Send a content-free high-priority data push that wakes the app.
 
     The payload is only {"type": "wake"} — no sender, no metadata — so the
     zero-knowledge property holds even through Google's push channel.
     """
-    try:
-        message = _fb_messaging.Message(
-            token=token,
-            data={"type": "wake"},
-            android=_fb_messaging.AndroidConfig(priority="high"),
-            apns=_fb_messaging.APNSConfig(
-                headers={"apns-priority": "5"},
-                payload=_fb_messaging.APNSPayload(
-                    aps=_fb_messaging.Aps(content_available=True)),
-            ),
-        )
-        await asyncio.to_thread(_fb_messaging.send, message)
-        logger.info("Sent wake push to %s", _uid(recipient_id))
-    except Exception as e:
-        if "Unregistered" in type(e).__name__ or "NotRegistered" in str(e):
-            # Token gone stale — stop paying FCM calls for a dead device.
-            fcm_tokens.pop(recipient_id, None)
-            logger.info("Dropped stale FCM token for %s", _uid(recipient_id))
-        else:
-            logger.warning("Wake push failed for %s: %s",
-                           _uid(recipient_id), type(e).__name__)
+    for token in list(tokens):
+        try:
+            message = _fb_messaging.Message(
+                token=token,
+                data={"type": "wake"},
+                android=_fb_messaging.AndroidConfig(priority="high"),
+                apns=_fb_messaging.APNSConfig(
+                    headers={"apns-priority": "5"},
+                    payload=_fb_messaging.APNSPayload(
+                        aps=_fb_messaging.Aps(content_available=True)),
+                ),
+            )
+            await asyncio.to_thread(_fb_messaging.send, message)
+            logger.info("Sent wake push to %s", _uid(recipient_id))
+        except Exception as e:
+            if "Unregistered" in type(e).__name__ or "NotRegistered" in str(e):
+                # Token gone stale — drop just that one, not the whole set.
+                tokens.discard(token)
+                logger.info("Dropped stale FCM token for %s",
+                            _uid(recipient_id))
+            else:
+                logger.warning("Wake push failed for %s: %s",
+                               _uid(recipient_id), type(e).__name__)
 
 
 def _maybe_wake(recipient_id: str, msg_type: str) -> None:
@@ -209,9 +218,9 @@ def _maybe_wake(recipient_id: str, msg_type: str) -> None:
     if recipient_id in _wake_sent:
         return
     _wake_sent.add(recipient_id)
-    token = fcm_tokens.get(recipient_id)
-    if token:
-        asyncio.create_task(_send_wake_push(recipient_id, token))
+    tokens = fcm_tokens.get(recipient_id)
+    if tokens:
+        asyncio.create_task(_send_wake_push(recipient_id, tokens))
     else:
         # Explicit: the device never pushed a token (or it was dropped as
         # stale) — without this line a tokenless recipient looks identical
@@ -272,8 +281,26 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
     nonce = base64.b64encode(os.urandom(32)).decode()
     await websocket.send_text(json.dumps({"type": "challenge", "nonce": nonce}))
 
+    # Per-connection frame rate limit: a legit chunked file transfer peaks
+    # around ~400 frames/sec; 800/sec is 2x headroom. Sustained floods get
+    # the socket closed — one abusive client can't burn the CPU for others.
+    frame_times = collections.deque()
+    MAX_FRAMES_PER_SEC = 800
+
     try:
         async for raw in websocket.iter_text():
+            now_ts = time.time()
+            frame_times.append(now_ts)
+            while frame_times and frame_times[0] < now_ts - 1.0:
+                frame_times.popleft()
+            if len(frame_times) > MAX_FRAMES_PER_SEC:
+                logger.warning("Rate limit exceeded — closing connection")
+                try:
+                    await websocket.close(code=4008)
+                except Exception:
+                    pass
+                return
+
             if len(raw) > MAX_FRAME_BYTES:
                 logger.warning("Oversized frame dropped (%d bytes)", len(raw))
                 continue
@@ -355,10 +382,17 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                 raw = json.dumps(data)
 
             # Push wake-up token — bound to the authenticated user_id.
+            # Stored in a set so multiple devices on the same identity all
+            # get woken; a tiny cap keeps a compromised session from
+            # ballooning the map.
             if msg_type == "fcm_token":
                 token = str(data.get("token", "")).strip()
                 if token and current_user_id:
-                    fcm_tokens[current_user_id] = token
+                    bucket = fcm_tokens[current_user_id]
+                    bucket.add(token)
+                    if len(bucket) > 8:
+                        fcm_tokens[current_user_id] = set(
+                            list(bucket)[-8:])
                 continue
 
             # Authenticated presence query — only ever replies with online/offline.
@@ -404,17 +438,29 @@ async def _handle_ws(websocket: WebSocket, user_id_from_path: str = ""):
                 }))
                 continue
 
-            # Delete for everyone — also purge from offline queue
+            # Delete for everyone — also purge from offline queue. Parse each
+            # queued frame and match message_uuid as a FIELD, not a substring
+            # — raw JSON string matching could purge unrelated frames whose
+            # base64 payload happened to contain the uuid text.
             if msg_type == "delete_message":
                 recipient_id = data.get("recipient_id")
                 recipient_id = recipient_id.strip().upper() if recipient_id else None
                 msg_uuid = data.get("message_uuid", "")
                 if recipient_id and msg_uuid and recipient_id in offline_queue:
-                    offline_queue[recipient_id] = [
-                        entry for entry in offline_queue[recipient_id]
-                        if msg_uuid not in entry[1]
-                    ]
-                    if not offline_queue[recipient_id]:
+                    kept = []
+                    for entry in offline_queue[recipient_id]:
+                        try:
+                            frame = json.loads(entry[1])
+                        except (json.JSONDecodeError, TypeError):
+                            kept.append(entry)
+                            continue
+                        if (frame.get("message_uuid") == msg_uuid
+                                or frame.get("file_id") == msg_uuid):
+                            continue  # purged
+                        kept.append(entry)
+                    if kept:
+                        offline_queue[recipient_id] = kept
+                    else:
                         offline_queue.pop(recipient_id, None)
                         _wake_sent.discard(recipient_id)
                 if recipient_id:

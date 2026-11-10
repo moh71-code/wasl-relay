@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -22,16 +23,119 @@ import 'websocket_service.dart';
 class GroupService {
   static final GroupService _instance = GroupService._internal();
   factory GroupService() => _instance;
-  GroupService._internal();
+  GroupService._internal() {
+    // Same partial-buffer hygiene as the 1:1 path — a dropped chunk would
+    // pin a half-received group file in RAM forever, and its placeholder
+    // row must become 'failed' instead of "receiving" forever.
+    WebSocketService().statusStream.listen((status) {
+      if (status == 'disconnected') {
+        _failInFlight();
+        _fileBuffers.clear();
+        _fileMeta.clear();
+        _lastChunkAt.clear();
+      }
+    });
+    Timer.periodic(const Duration(seconds: 30), (_) {
+      final cutoff =
+          DateTime.now().millisecondsSinceEpoch - _staleTransferMs;
+      for (final fileId in _fileBuffers.keys.toList()) {
+        final last = _lastChunkAt[fileId] ?? 0;
+        if (last != 0 && last < cutoff) {
+          _fileBuffers.remove(fileId);
+          _fileMeta.remove(fileId);
+          _lastChunkAt.remove(fileId);
+          unawaited(_failTransfer(fileId));
+        }
+      }
+    });
+  }
+
+  static const int _staleTransferMs = 90 * 1000;
+  static const int _maxResends = 3;
+  final Map<String, int> _lastChunkAt = {};
+  final Map<String, int> _resentCount = {};
+  final Set<String> _resendRequested = {};
+
+  void _failInFlight() {
+    for (final fileId in _fileBuffers.keys) {
+      unawaited(_failTransfer(fileId));
+    }
+  }
+
+  Future<void> _failTransfer(String fileId) async {
+    await DatabaseHelper.instance.markTransferFailedByUuid(fileId);
+    final meta = _fileMeta[fileId];
+    final sender = meta?['sender_id'] as String?;
+    final groupId = meta?['group_id'] as String?;
+    final myId = (await _storage.getUserId())?.trim().toUpperCase();
+    if (sender != null &&
+        groupId != null &&
+        myId != null &&
+        _resendRequested.add(fileId)) {
+      WebSocketService().sendData({
+        'type': 'group_file_resend_request',
+        'group_id': groupId,
+        'file_id': fileId,
+        'sender_id': myId,
+        'recipient_id': sender,
+      });
+    }
+  }
 
   final CryptoEngine _engine = CryptoEngine();
   final StorageService _storage = StorageService();
   final Uuid _uuid = const Uuid();
 
-  // Incoming group file assembly buffers (file_id -> chunks/expectations/meta)
+  // Incoming group file assembly buffers (file_id -> chunks/meta)
   final Map<String, Map<int, Uint8List>> _fileBuffers = {};
-  final Map<String, int> _fileExpected = {};
   final Map<String, Map<String, dynamic>> _fileMeta = {};
+
+  /// Seal filename + media type inside the GROUP key — the relay then sees
+  /// only opaque frames, matching the 1:1 path's privacy level.
+  Future<Map<String, String>> _sealMeta(
+      String name, String mediaType, SecretKey key) async {
+    final enc = await _engine.encryptMessage(
+      plainText: jsonEncode({'n': name, 't': mediaType}),
+      sharedKey: key,
+    );
+    return {'nct': enc['ciphertext']!, 'nn': enc['nonce']!, 'nm': enc['mac']!};
+  }
+
+  Future<Map<String, String>?> _openMeta(
+      Map<String, dynamic> frame, String groupId) async {
+    final nct = frame['nct'] as String?;
+    final nn = frame['nn'] as String?;
+    final nm = frame['nm'] as String?;
+    if (nct == null || nn == null || nm == null) {
+      final legacy = frame['original_name'] as String?;
+      if (legacy == null) return null;
+      return {
+        'name': legacy,
+        'mediaType': (frame['media_type'] as String?) ??
+            WaslMedia.typeFromName(legacy),
+      };
+    }
+    try {
+      final groupKeyB64 = await _storage.getGroupKey(groupId);
+      if (groupKeyB64 == null) return null;
+      final clear = await _engine.decryptMessage(
+        cipherTextBase64: nct,
+        nonceBase64: nn,
+        macBase64: nm,
+        sharedKey: SecretKey(base64.decode(groupKeyB64)),
+      );
+      final parsed = jsonDecode(clear);
+      if (parsed is! Map) return null;
+      final name = parsed['n']?.toString() ?? 'file';
+      return {
+        'name': name,
+        'mediaType':
+            parsed['t']?.toString() ?? WaslMedia.typeFromName(name),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
 
   static String generateGroupId() {
     final rand = Random.secure();
@@ -250,6 +354,8 @@ class GroupService {
     final fileId = _uuid.v4();
     final name = originalName.isEmpty ? 'file' : originalName;
     final mediaType = WaslMedia.typeFromName(name);
+    final sealed =
+        await _sealMeta(name, mediaType, SecretKey(base64.decode(groupKeyB64)));
     final totalChunks = (ciphertext.length / chunkSize).ceil();
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final expiresAt = ttlMs != null ? timestamp + ttlMs : null;
@@ -263,7 +369,6 @@ class GroupService {
         jsonEncode({
           'nonce': nonceB64,
           'mac': macB64,
-          'sender_id': myIdNorm,
           'group_id': groupId,
           'original_name': name,
           'media_type': mediaType,
@@ -295,9 +400,9 @@ class GroupService {
             'ciphertext_b64': base64.encode(ciphertext),
             'nonce': nonceB64,
             'mac': macB64,
-            'original_name': name,
-            'media_type': mediaType,
+            ...sealed,
             'expires_at': expiresAt,
+            'chunk_size': chunkSize,
           }),
           messageUuid: fileId,
           priority: 2,
@@ -312,8 +417,7 @@ class GroupService {
         'sender_id': myIdNorm,
         'recipient_id': mid,
         'sender_name': myName,
-        'original_name': name,
-        'media_type': mediaType,
+        ...sealed,
         'expires_at': expiresAt,
         'total_chunks': totalChunks,
       });
@@ -333,11 +437,12 @@ class GroupService {
           'encrypted_payload': base64.encode(ciphertext.sublist(start, end)),
           'nonce': nonceB64,
           'mac': macB64,
-          'original_name': name,
-          'media_type': mediaType,
+          ...sealed,
           'expires_at': expiresAt,
         });
-        await Future.delayed(const Duration(milliseconds: 20));
+        if (i % 8 == 7) {
+          await Future.delayed(const Duration(milliseconds: 20));
+        }
       }
     }
 
@@ -384,7 +489,6 @@ class GroupService {
       jsonEncode({
         'nonce': nonce,
         'mac': mac,
-        'sender_id': senderId,
         'group_id': groupId,
         'original_name': origName,
         'media_type': mediaType,
@@ -581,9 +685,9 @@ class GroupService {
           fileId == null) {
         return true;
       }
-      final origName = data['original_name'] as String? ?? '';
-      final mediaType =
-          (data['media_type'] as String?) ?? WaslMedia.typeFromName(origName);
+      final opened = await _openMeta(data, groupId);
+      final origName = opened?['name'] ?? 'file';
+      final mediaType = opened?['mediaType'] ?? 'file';
       _fileMeta[fileId] = {
         'group_id': groupId,
         'sender_id': senderId,
@@ -592,6 +696,10 @@ class GroupService {
         'media_type': mediaType,
         'expires_at': data['expires_at'],
       };
+      // Same offer-level tracking as the 1:1 path — an offer whose chunks
+      // never arrive must not pin the row at "receiving" forever.
+      _fileBuffers.putIfAbsent(fileId, () => {});
+      _lastChunkAt[fileId] = DateTime.now().millisecondsSinceEpoch;
       await DatabaseHelper.instance.saveMessageAndUpdateContacts({
         'message_uuid': fileId,
         'sender_id': senderId,
@@ -629,15 +737,18 @@ class GroupService {
       _fileBuffers.putIfAbsent(fileId, () => {});
       _fileBuffers[fileId]![idx] =
           Uint8List.fromList(base64.decode(encoded));
-      _fileExpected[fileId] = total;
-      _fileMeta[fileId] ??= {
-        'group_id': groupId,
-        'sender_id': senderId,
-        'sender_name': data['sender_name'],
-        'original_name': data['original_name'] as String? ?? '',
-        'media_type': data['media_type'],
-        'expires_at': data['expires_at'],
-      };
+      _lastChunkAt[fileId] = DateTime.now().millisecondsSinceEpoch;
+      if (_fileMeta[fileId] == null) {
+        final opened = await _openMeta(data, groupId);
+        _fileMeta[fileId] = {
+          'group_id': groupId,
+          'sender_id': senderId,
+          'sender_name': data['sender_name'],
+          'original_name': opened?['name'] ?? 'file',
+          'media_type': opened?['mediaType'] ?? 'file',
+          'expires_at': data['expires_at'],
+        };
+      }
 
       final buf = _fileBuffers[fileId]!;
       if (buf.length == total) {
@@ -674,8 +785,9 @@ class GroupService {
             debugPrint('GroupService: failed to persist group file: $e');
           } finally {
             _fileBuffers.remove(fileId);
-            _fileExpected.remove(fileId);
             _fileMeta.remove(fileId);
+            _lastChunkAt.remove(fileId);
+            _resendRequested.remove(fileId);
           }
         }
       }
@@ -696,6 +808,7 @@ class GroupService {
         return true;
       }
       try {
+        final opened = await _openMeta(data, groupId);
         await _persistGroupFile(
           groupId: groupId,
           fileId: fileId,
@@ -704,15 +817,90 @@ class GroupService {
           ciphertext: base64.decode(cipherB64),
           nonce: data['nonce'] as String? ?? '',
           mac: data['mac'] as String? ?? '',
-          origName: data['original_name'] as String? ?? '',
-          mediaType: (data['media_type'] as String?) ??
-              WaslMedia.typeFromName(
-                  data['original_name'] as String? ?? ''),
+          origName: opened?['name'] ?? 'file',
+          mediaType: opened?['mediaType'] ?? 'file',
           expiresAt: data['expires_at'],
           myId: myIdNorm,
         );
       } catch (e) {
         debugPrint('GroupService: failed to persist offline group file: $e');
+      }
+      return true;
+    }
+
+    if (type == 'group_file_resend_request') {
+      final requester = (data['sender_id'] as String?)?.trim().toUpperCase();
+      final recipientId =
+          (data['recipient_id'] as String?)?.trim().toUpperCase();
+      final groupId = (data['group_id'] as String?)?.trim().toUpperCase();
+      final fileId = data['file_id'] == null
+          ? null
+          : WaslMedia.safeFileId(data['file_id'] as String);
+      if (recipientId != myIdNorm ||
+          requester == null ||
+          groupId == null ||
+          fileId == null) {
+        return true;
+      }
+      final sent = _resentCount[fileId] ?? 0;
+      if (sent >= _maxResends) return true;
+      try {
+        final appDir = await getApplicationDocumentsDirectory();
+        String? cipherPath;
+        String? metaPath;
+        for (final e in appDir.listSync()) {
+          final base = e.path.split(Platform.pathSeparator).last;
+          if (base.startsWith('${fileId}_') && base.endsWith('.meta.json')) {
+            metaPath = e.path;
+          } else if (base.startsWith('${fileId}_')) {
+            cipherPath = e.path;
+          }
+        }
+        if (cipherPath == null || metaPath == null) return true;
+        final meta = jsonDecode(await File(metaPath).readAsString());
+        final ciphertext = await File(cipherPath).readAsBytes();
+        final groupKeyB64 = await _storage.getGroupKey(groupId);
+        if (groupKeyB64 == null) return true;
+        final name = meta['original_name'] as String? ?? 'file';
+        final mediaType = meta['media_type'] as String? ??
+            WaslMedia.typeFromName(name);
+        final sealed = await _sealMeta(
+            name, mediaType, SecretKey(base64.decode(groupKeyB64)));
+        const chunkSize = 64 * 1024;
+        final totalChunks = (ciphertext.length / chunkSize).ceil();
+        _resentCount[fileId] = sent + 1;
+        WebSocketService().sendData({
+          'type': 'group_file_offer',
+          'group_id': groupId,
+          'file_id': fileId,
+          'sender_id': myIdNorm,
+          'recipient_id': requester,
+          ...sealed,
+          'total_chunks': totalChunks,
+        });
+        for (var i = 0; i < totalChunks; i++) {
+          final start = i * chunkSize;
+          final end = ((i + 1) * chunkSize).clamp(0, ciphertext.length);
+          WebSocketService().sendData({
+            'type': 'group_file_chunk',
+            'group_id': groupId,
+            'file_id': fileId,
+            'sender_id': myIdNorm,
+            'recipient_id': requester,
+            'chunk_index': i,
+            'total_chunks': totalChunks,
+            'encrypted_payload':
+                base64.encode(ciphertext.sublist(start, end)),
+            'nonce': meta['nonce'],
+            'mac': meta['mac'],
+            ...sealed,
+          });
+          if (i % 8 == 7) {
+            await Future.delayed(const Duration(milliseconds: 15));
+          }
+        }
+      } catch (e) {
+        debugPrint('GroupService: resend for $fileId failed: $e');
       }
       return true;
     }

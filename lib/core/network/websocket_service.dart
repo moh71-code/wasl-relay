@@ -335,6 +335,11 @@ class WebSocketService {
       } catch (e) {
         debugPrint('Failed to send data over WebSocket: $e');
       }
+    } else {
+      // Log drops — silent loss of mid-transfer chunks was undebuggable.
+      // The resend-request protocol heals receiver-side gaps, but without
+      // this line a dead socket looked identical to a successful send.
+      debugPrint('sendData: dropped ${data['type']} (not connected)');
     }
   }
 
